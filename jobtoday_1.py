@@ -48,12 +48,56 @@ class JobTodayWebhookScraper:
             print("✓ n8n webhook configured")
         
     async def initialize_browser(self, headless=True):
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=headless, args=["--start-maximized"])
-        self.context = await self.browser.new_context(no_viewport=True)
-        await self.context.grant_permissions(['geolocation'], origin=self.base_url)
-        self.page = await self.context.new_page()
-        print("✓ Browser initialized")
+        """Initialize browser with Render-compatible settings"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            logger.info("Starting Playwright...")
+            self.playwright = await async_playwright().start()
+            
+            logger.info("Launching Chromium browser...")
+            
+            # Render-compatible browser arguments
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu',
+                '--window-size=1920x1080',
+                '--single-process',
+                '--disable-dev-tools',
+                '--no-zygote',
+                '--disable-blink-features=AutomationControlled'
+            ]
+            
+            logger.info(f"Browser args: {browser_args}")
+            
+            self.browser = await self.playwright.chromium.launch(
+                headless=headless,
+                args=browser_args
+            )
+            
+            logger.info("Creating browser context...")
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            
+            await self.context.grant_permissions(['geolocation'], origin=self.base_url)
+            
+            logger.info("Creating new page...")
+            self.page = await self.context.new_page()
+            
+            logger.info("✓ Browser initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"✗ Browser initialization failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
         
     async def login(self):
         try:
