@@ -52,22 +52,21 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright and its dependencies
-RUN playwright install chromium
-RUN playwright install-deps chromium
-
 # Copy application code
 COPY . .
 
 # Create directories for session and output files
 RUN mkdir -p /app/data
 
+# Install Playwright browsers AFTER copying application code
+# This ensures browsers are installed with correct permissions and paths
+RUN python -m playwright install chromium --with-deps
+
 # Expose port
 EXPOSE 10000
 
 # Set environment variables
 ENV PORT=10000
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Run the application with better error handling
-CMD gunicorn --bind 0.0.0.0:$PORT --timeout 900 --workers 1 --threads 1 --log-level debug --access-logfile - --error-logfile - scraper_api:app
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 900 --workers 1 --threads 1 --log-level info --access-logfile - --error-logfile - scraper_api:app
