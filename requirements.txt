@@ -1,0 +1,8 @@
+flask
+requests
+ngrok
+playwright
+python-dotenv 
+pandas
+schedule
+gunicorn

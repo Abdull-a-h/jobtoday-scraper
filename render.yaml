@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: jobtoday-scraper-api
+    env: python
+    buildCommand: pip install -r requirements.txt && playwright install chromium && playwright install-deps
+    startCommand: gunicorn scraper_api:app
+    envVars:
+      - key: JOBTODAY_EMAIL
+        sync: false
+      - key: JOBTODAY_PASSWORD
+        sync: false
+      - key: AIRTABLE_PAT
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: AIRTABLE_TABLE_NAME
+        value: Candidates
+      - key: N8N_WEBHOOK_URL
+        sync: false
