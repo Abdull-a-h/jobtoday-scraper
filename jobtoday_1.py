@@ -702,19 +702,64 @@ class JobTodayWebhookScraper:
 
             await self.scrape_job_role()
 
-            print("\n→ Navigating to the main job page to begin...")
-            main_job_url = f"{self.base_url}/jobs/{self.job_id}"
-            await self.page.goto(main_job_url, wait_until='domcontentloaded', timeout=45000)
-            
-            applicants_link_selector = f'a[href*="/jobs/{self.job_id}/incoming"]'
-            print("   → Looking for the 'Applicants' link...")
-            await self.page.wait_for_selector(applicants_link_selector, timeout=20000)
-            
-            print("   → Clicking the 'Applicants' link...")
-            await self.page.click(applicants_link_selector)
-            
-            await self.page.wait_for_selector('div.col-span-1.overflow-y-auto', timeout=20000)
-            print("   ✓ Successfully navigated to applicants area.")
+            print("\n→ Navigating to the applicants section...")
+
+            # Direct navigation to incoming section (more reliable)
+            incoming_url = f"{self.base_url}/jobs/{self.job_id}/incoming"
+
+            try:
+                # Try direct navigation first (fastest method)
+                print("   → Attempting direct navigation to applicants...")
+                await self.page.goto(incoming_url, wait_until='domcontentloaded', timeout=45000)
+                
+                # Wait for the candidates list to load
+                await self.page.wait_for_selector('div.col-span-1.overflow-y-auto', timeout=30000)
+                print("   ✓ Successfully navigated to applicants area (direct).")
+                
+            except Exception as direct_nav_error:
+                print(f"   ⚠ Direct navigation failed: {direct_nav_error}")
+                print("   → Trying navigation via main job page...")
+                
+                # Fallback: Navigate via main job page
+                try:
+                    main_job_url = f"{self.base_url}/jobs/{self.job_id}"
+                    await self.page.goto(main_job_url, wait_until='domcontentloaded', timeout=45000)
+                    
+                    # Wait for page to fully load
+                    await asyncio.sleep(3)
+                    
+                    # Multiple possible selectors for the applicants link
+                    applicants_selectors = [
+                        f'a[href="/jobs/{self.job_id}/incoming"]',
+                        f'a[href*="/jobs/{self.job_id}/incoming"]',
+                        'a:has-text("Applicants")',
+                        'a:has-text("applicants")'
+                    ]
+                    
+                    clicked = False
+                    for selector in applicants_selectors:
+                        try:
+                            print(f"   → Trying selector: {selector}")
+                            await self.page.wait_for_selector(selector, timeout=10000, state='visible')
+                            await self.page.click(selector)
+                            clicked = True
+                            print(f"   ✓ Clicked using selector: {selector}")
+                            break
+                        except:
+                            continue
+                    
+                    if not clicked:
+                        # Last resort: use direct navigation
+                        print("   → No link found, using direct URL navigation...")
+                        await self.page.goto(incoming_url, wait_until='domcontentloaded', timeout=45000)
+                    
+                    # Wait for candidates list
+                    await self.page.wait_for_selector('div.col-span-1.overflow-y-auto', timeout=30000)
+                    print("   ✓ Successfully navigated to applicants area (via fallback).")
+                    
+                except Exception as fallback_error:
+                    print(f"   ✗ All navigation methods failed: {fallback_error}")
+                    raise Exception("Could not navigate to applicants section")
 
             sections_to_scrape = ['recommended', 'incoming']
             for section in sections_to_scrape:
