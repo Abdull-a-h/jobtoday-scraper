@@ -1,6 +1,5 @@
 flask
 requests
-ngrok
 playwright
 python-dotenv 
 pandas
