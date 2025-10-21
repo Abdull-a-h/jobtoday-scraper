@@ -269,12 +269,12 @@ class JobTodayWebhookScraper:
         try:
             print("\n→ Scraping job role...")
             main_job_url = f"{self.base_url}/jobs/{self.job_id}"
-            await self.page.goto(main_job_url, wait_until='domcontentloaded', timeout=45000)
-            await asyncio.sleep(3)
+            await self.page.goto(main_job_url, wait_until='domcontentloaded', timeout=90000)  # Increased
+            await asyncio.sleep(5)  # Increased wait time
             
             # Wait for the role element and extract it
             role_selector = 'div.bg-white.rounded-b-xl div.text-black.font-bold.mb-1'
-            await self.page.wait_for_selector(role_selector, timeout=10000)
+            await self.page.wait_for_selector(role_selector, timeout=20000)  # Increased
             
             role_element = self.page.locator(role_selector).first
             self.job_role = await role_element.inner_text()
@@ -283,9 +283,57 @@ class JobTodayWebhookScraper:
             return self.job_role
             
         except Exception as e:
-            print(f"   ✗ Error scraping job role: {e}")
-            self.job_role = "N/A"
+            print(f"   ⚠ Could not scrape job role: {e}")
+            # Set a default role instead of failing
+            self.job_role = f"Job {self.job_id}"
+            print(f"   → Using default role: {self.job_role}")
             return self.job_role
+        
+    async def safe_goto(self, url, timeout=90000, max_retries=3):
+        """Navigate to URL with retries and better error handling"""
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"   → Navigating to {url} (attempt {attempt}/{max_retries})...")
+                await self.page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+                await asyncio.sleep(3)
+                
+                # Verify we didn't get redirected to login
+                if '/auth/login' in self.page.url:
+                    print("   ⚠ Got redirected to login, re-authenticating...")
+                    if not await self.login_with_retry(max_attempts=2):
+                        raise Exception("Re-login failed")
+                    # Try again after login
+                    await self.page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+                    await asyncio.sleep(3)
+                
+                print(f"   ✓ Successfully navigated")
+                return True
+                
+            except Exception as e:
+                print(f"   ⚠ Navigation attempt {attempt} failed: {e}")
+                if attempt < max_retries:
+                    wait_time = attempt * 5  # Exponential backoff
+                    print(f"   → Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"   ✗ All navigation attempts failed")
+                    raise
+        
+        return False
+
+    async def safe_click(self, locator, timeout=45000, max_retries=2):
+        """Click element with retries"""
+        for attempt in range(1, max_retries + 1):
+            try:
+                await locator.click(timeout=timeout)
+                return True
+            except Exception as e:
+                if attempt < max_retries:
+                    print(f"   ⚠ Click attempt {attempt} failed, retrying...")
+                    await asyncio.sleep(3)
+                else:
+                    raise
+        return False
 
     async def scrape_section(self, section_name):
         section_url = f"{self.base_url}/jobs/{self.job_id}/{section_name}"
@@ -297,10 +345,10 @@ class JobTodayWebhookScraper:
         for attempt in range(1, max_page_load_attempts + 1):
             try:
                 print(f"   → Loading page (attempt {attempt}/{max_page_load_attempts})...")
-                await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
+                await self.safe_goto(section_url)  # Increased
                 
                 # Check if we got redirected to login
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)  # Increased wait time
                 current_url = self.page.url
                 
                 if '/auth/login' in current_url:
@@ -308,20 +356,19 @@ class JobTodayWebhookScraper:
                     if not await self.login_with_retry(max_attempts=2):
                         raise Exception("Re-login failed")
                     # Try navigating again after login
-                    await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
-                    await asyncio.sleep(3)
+                    await self.safe_goto(section_url)
+                    await asyncio.sleep(5)
                 
                 # Wait for the list container with multiple attempts
                 list_container_selector = 'div.col-span-1.overflow-y-auto'
                 candidate_button_selector = f'button:has(img[alt$="\'s avatar"])'
                 
                 try:
-                    await self.page.wait_for_selector(list_container_selector, timeout=30000)
+                    await self.page.wait_for_selector(list_container_selector, timeout=45000)  # Increased
                     print("   ✓ List container found")
                     page_loaded = True
                     break
                 except PlaywrightTimeout:
-                    # Take a screenshot to debug
                     screenshot_path = f'/app/data/debug_section_{section_name}_attempt_{attempt}.png'
                     await self.page.screenshot(path=screenshot_path, full_page=True)
                     print(f"   ⚠ List container not found, screenshot saved: {screenshot_path}")
@@ -345,12 +392,12 @@ class JobTodayWebhookScraper:
                         
                     if attempt < max_page_load_attempts:
                         print(f"   → Retrying page load...")
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10)  # Increased retry delay
                         
             except Exception as e:
                 print(f"   ✗ Error loading page (attempt {attempt}): {e}")
                 if attempt < max_page_load_attempts:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(10)
                 else:
                     raise
         
@@ -358,49 +405,45 @@ class JobTodayWebhookScraper:
             raise Exception(f"Could not load section {section_name} after {max_page_load_attempts} attempts")
         
         # Continue with scraping
-        await asyncio.sleep(5)
+        await asyncio.sleep(7)  # Increased wait time for candidates to load
         
         # Count candidates
         candidate_button_selector = f'button:has(img[alt$="\'s avatar"])'
         
         # Wait a bit more for candidates to load
         print("   → Waiting for candidates to load...")
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)  # Increased
         
         total_candidates_in_section = await self.page.locator(candidate_button_selector).count()
 
         if total_candidates_in_section == 0:
             print(f"   ! No candidates found in the '{section_name}' section.")
-            
-            # Debug: Check what's actually on the page
             page_content = await self.page.content()
             if 'no applicants' in page_content.lower() or 'no candidates' in page_content.lower():
                 print(f"   ! Section appears to be empty (no applicants message found)")
             else:
                 print(f"   ⚠ Page loaded but candidate selector didn't match")
-                # Save debug screenshot
                 await self.page.screenshot(path=f'/app/data/debug_no_candidates_{section_name}.png', full_page=True)
             return
 
         print(f"   ✓ Found {total_candidates_in_section} candidates.")
 
-
         for i in range(total_candidates_in_section):
             candidate_name = f"Candidate {i+1}"
             application_date = "N/A"
-            max_retries = 2  # Will try once, then retry once if it fails
+            max_retries = 2
             retry_count = 0
             success = False
             
             while retry_count < max_retries and not success:
                 try:
-                    await self.page.wait_for_selector(candidate_button_selector, timeout=40000)
+                    await self.page.wait_for_selector(candidate_button_selector, timeout=60000)  # Increased
                     candidate_button = self.page.locator(candidate_button_selector).nth(i)
-                    candidate_name = await candidate_button.locator('.font-bold').first.inner_text(timeout=10000)
+                    candidate_name = await candidate_button.locator('.font-bold').first.inner_text(timeout=15000)
                     
                     if candidate_name in self.processed_names:
                         print(f"--- Skipping {i+1}/{total_candidates_in_section}: {candidate_name} (already processed) ---")
-                        success = True  # Mark as success to avoid retry
+                        success = True
                         break
                     
                     try:
@@ -413,23 +456,23 @@ class JobTodayWebhookScraper:
                     retry_suffix = f" (Retry {retry_count})" if retry_count > 0 else ""
                     print(f"--- Processing {i+1}/{total_candidates_in_section}: {candidate_name}{retry_suffix} ---")
                     
-                    # Try to click the candidate button
-                    await candidate_button.click(timeout=30000)
+                    # Try to click with increased timeout
+                    await candidate_button.click(timeout=45000)  # Increased
                     
                     profile_view_selector = 'button:has-text("Chat with")'
                     print("   → Waiting for profile details to load...")
-                    await self.page.wait_for_selector(profile_view_selector, timeout=40000)
+                    await self.page.wait_for_selector(profile_view_selector, timeout=60000)  # Increased
                     print("   ✓ Profile details loaded.")
 
                     await self.page.evaluate('document.querySelectorAll("[id^=intercom-container], .intercom-lightweight-app").forEach(el => el.remove())')
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(3)  # Increased
 
                     details = await self.scrape_candidate_details(self.page.url, application_date)
                     self.candidates.append(details)
                     self.processed_names.add(candidate_name)
                     print(f"   + Scraped: {details.get('name', 'N/A')}")
                     
-                    success = True  # Mark as successful
+                    success = True
                 
                 except PlaywrightTimeout as e:
                     retry_count += 1
@@ -439,20 +482,18 @@ class JobTodayWebhookScraper:
                         print(f"   ⚠ Timeout occurred on candidate {i+1} ({candidate_name}): {error_msg}")
                         print(f"   → Returning to list view and retrying (attempt {retry_count + 1}/{max_retries})...")
                         
-                        # Go back to list view for retry
                         try:
-                            await self.page.goto(section_url, wait_until="domcontentloaded", timeout=40000)
+                            await self.safe_goto(section_url)  # Increased
+                            await asyncio.sleep(5)
+                            await self.page.wait_for_selector(candidate_button_selector, timeout=45000)
                             await asyncio.sleep(3)
-                            # Wait for the list to be ready
-                            await self.page.wait_for_selector(candidate_button_selector, timeout=30000)
-                            await asyncio.sleep(2)
                         except Exception as nav_error:
                             print(f"   ✗ Error navigating back to list: {nav_error}")
                             break
                     else:
                         print(f"   ✗ Failed to scrape candidate {i+1} ({candidate_name}) after {max_retries} attempts: {error_msg}")
                         if not self.page.is_closed():
-                            await self.page.screenshot(path=f'debug_profile_error_{candidate_name.replace(" ", "_")}.png', full_page=True)
+                            await self.page.screenshot(path=f'/app/data/debug_profile_error_{candidate_name.replace(" ", "_")}.png', full_page=True)
                         
                 except Exception as e:
                     retry_count += 1
@@ -463,17 +504,17 @@ class JobTodayWebhookScraper:
                         print(f"   → Returning to list view and retrying (attempt {retry_count + 1}/{max_retries})...")
                         
                         try:
-                            await self.page.goto(section_url, wait_until="domcontentloaded", timeout=40000)
+                            await self.safe_goto(section_url)
+                            await asyncio.sleep(5)
+                            await self.page.wait_for_selector(candidate_button_selector, timeout=45000)
                             await asyncio.sleep(3)
-                            await self.page.wait_for_selector(candidate_button_selector, timeout=30000)
-                            await asyncio.sleep(2)
                         except Exception as nav_error:
                             print(f"   ✗ Error navigating back to list: {nav_error}")
                             break
                     else:
                         print(f"   ✗ Failed to scrape candidate {i+1} ({candidate_name}) after {max_retries} attempts: {error_msg}")
                         if not self.page.is_closed():
-                            await self.page.screenshot(path=f'debug_profile_error_{candidate_name.replace(" ", "_")}.png', full_page=True)
+                            await self.page.screenshot(path=f'/app/data/debug_profile_error_{candidate_name.replace(" ", "_")}.png', full_page=True)
                 
                 finally:
                     if self.page.is_closed():
@@ -482,16 +523,16 @@ class JobTodayWebhookScraper:
             
             # After success or max retries, return to list view for next candidate
             if success and candidate_name not in self.processed_names:
-                # This means we skipped it because it was already processed
                 continue
                 
             print(f"   ← Resetting to list view for next candidate...")
             try:
-                await self.page.goto(section_url, wait_until="domcontentloaded", timeout=40000)
-                await asyncio.sleep(3)
+                await self.safe_goto(section_url)  # Increased
+                await asyncio.sleep(5)
             except Exception as e:
                 print(f"   ✗ Error resetting to list view: {e}")
-                break
+                # Continue anyway - don't break the loop
+                continue
 
     async def scrape_candidate_details(self, candidate_url, application_date):
         details = {'profile_url': candidate_url, 'application_date': application_date, 'job_role': self.job_role}

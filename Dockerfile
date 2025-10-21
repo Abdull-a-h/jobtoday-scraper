@@ -69,4 +69,4 @@ EXPOSE 10000
 ENV PORT=10000
 
 # Run the application with better error handling
-CMD gunicorn --bind 0.0.0.0:$PORT --timeout 900 --workers 1 --threads 1 --log-level info --access-logfile - --error-logfile - scraper_api:app
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 1800 --workers 1 --threads 1 --log-level info --access-logfile - --error-logfile - scraper_api:app
