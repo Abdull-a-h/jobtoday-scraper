@@ -247,18 +247,99 @@ class JobTodayWebhookScraper:
         section_url = f"{self.base_url}/jobs/{self.job_id}/{section_name}"
         print(f"\n→ Processing section: {section_url}")
         
-        await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
-        list_container_selector = 'div.col-span-1.overflow-y-auto'
-        await self.page.wait_for_selector(list_container_selector, timeout=30000)
-        candidate_button_selector = f'button:has(img[alt$="\'s avatar"])'
+        max_page_load_attempts = 3
+        page_loaded = False
+        
+        for attempt in range(1, max_page_load_attempts + 1):
+            try:
+                print(f"   → Loading page (attempt {attempt}/{max_page_load_attempts})...")
+                await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
+                
+                # Check if we got redirected to login
+                await asyncio.sleep(3)
+                current_url = self.page.url
+                
+                if '/auth/login' in current_url:
+                    print("   ⚠ Session expired, re-authenticating...")
+                    if not await self.login_with_retry(max_attempts=2):
+                        raise Exception("Re-login failed")
+                    # Try navigating again after login
+                    await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
+                    await asyncio.sleep(3)
+                
+                # Wait for the list container with multiple attempts
+                list_container_selector = 'div.col-span-1.overflow-y-auto'
+                candidate_button_selector = f'button:has(img[alt$="\'s avatar"])'
+                
+                try:
+                    await self.page.wait_for_selector(list_container_selector, timeout=30000)
+                    print("   ✓ List container found")
+                    page_loaded = True
+                    break
+                except PlaywrightTimeout:
+                    # Take a screenshot to debug
+                    screenshot_path = f'/app/data/debug_section_{section_name}_attempt_{attempt}.png'
+                    await self.page.screenshot(path=screenshot_path, full_page=True)
+                    print(f"   ⚠ List container not found, screenshot saved: {screenshot_path}")
+                    
+                    # Check if there are any candidates visible with alternative selector
+                    alt_selectors = [
+                        'div.overflow-y-auto',
+                        '[class*="overflow-y-auto"]',
+                        'div[class*="col-span"]'
+                    ]
+                    
+                    for alt_selector in alt_selectors:
+                        if await self.page.locator(alt_selector).count() > 0:
+                            print(f"   → Found alternative container: {alt_selector}")
+                            list_container_selector = alt_selector
+                            page_loaded = True
+                            break
+                    
+                    if page_loaded:
+                        break
+                        
+                    if attempt < max_page_load_attempts:
+                        print(f"   → Retrying page load...")
+                        await asyncio.sleep(5)
+                        
+            except Exception as e:
+                print(f"   ✗ Error loading page (attempt {attempt}): {e}")
+                if attempt < max_page_load_attempts:
+                    await asyncio.sleep(5)
+                else:
+                    raise
+        
+        if not page_loaded:
+            raise Exception(f"Could not load section {section_name} after {max_page_load_attempts} attempts")
+        
+        # Continue with scraping
         await asyncio.sleep(5)
+        
+        # Count candidates
+        candidate_button_selector = f'button:has(img[alt$="\'s avatar"])'
+        
+        # Wait a bit more for candidates to load
+        print("   → Waiting for candidates to load...")
+        await asyncio.sleep(3)
+        
         total_candidates_in_section = await self.page.locator(candidate_button_selector).count()
 
         if total_candidates_in_section == 0:
             print(f"   ! No candidates found in the '{section_name}' section.")
+            
+            # Debug: Check what's actually on the page
+            page_content = await self.page.content()
+            if 'no applicants' in page_content.lower() or 'no candidates' in page_content.lower():
+                print(f"   ! Section appears to be empty (no applicants message found)")
+            else:
+                print(f"   ⚠ Page loaded but candidate selector didn't match")
+                # Save debug screenshot
+                await self.page.screenshot(path=f'/app/data/debug_no_candidates_{section_name}.png', full_page=True)
             return
 
         print(f"   ✓ Found {total_candidates_in_section} candidates.")
+
 
         for i in range(total_candidates_in_section):
             candidate_name = f"Candidate {i+1}"
