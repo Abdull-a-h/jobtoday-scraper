@@ -293,7 +293,7 @@ class JobTodayWebhookScraper:
         if hasattr(self, 'progress_tracker'):
             self.progress_tracker.update(section=section_name)
         
-        # Load the section page with retries
+        # Load the section page ONCE at the start
         page_loaded = False
         for attempt in range(1, 4):
             try:
@@ -301,10 +301,9 @@ class JobTodayWebhookScraper:
                 logger.info(f"Loading page attempt {attempt}/3")
                 
                 # Navigate to section
-                await self.page.goto(section_url, wait_until='load', timeout=60000)
-                logger.info("Page loaded, waiting for stability...")
-                await self.wait_for_stable_page()
-                logger.info("Page stable")
+                await self.page.goto(section_url, wait_until='networkidle', timeout=90000)
+                logger.info("Page loaded with networkidle")
+                await asyncio.sleep(3)
                 
                 # Check for login redirect
                 current_url = self.page.url
@@ -315,8 +314,8 @@ class JobTodayWebhookScraper:
                     logger.warning("Session expired, re-authenticating")
                     if not await self.login_with_retry(max_attempts=2):
                         raise Exception("Re-login failed")
-                    await self.page.goto(section_url, wait_until='load', timeout=60000)
-                    await self.wait_for_stable_page()
+                    await self.page.goto(section_url, wait_until='networkidle', timeout=90000)
+                    await asyncio.sleep(3)
                 
                 # Wait for list container
                 list_container_selector = 'div.col-span-1.overflow-y-auto'
@@ -331,22 +330,6 @@ class JobTodayWebhookScraper:
                     break
                 except PlaywrightTimeout as timeout_error:
                     logger.error(f"List container not found: {timeout_error}")
-                    
-                    # Take screenshot for debugging
-                    screenshot_path = f'/app/data/debug_section_{section_name}_attempt_{attempt}.png'
-                    try:
-                        await self.page.screenshot(path=screenshot_path, full_page=True)
-                        logger.info(f"Screenshot saved: {screenshot_path}")
-                    except:
-                        pass
-                    
-                    # Log page content for debugging
-                    page_title = await self.page.title()
-                    logger.info(f"Page title: {page_title}")
-                    
-                    # Check what's actually on the page
-                    body_text = await self.page.locator('body').inner_text()
-                    logger.info(f"Page body preview (first 500 chars): {body_text[:500]}")
                     
                     if attempt < 3:
                         logger.info("Retrying page load...")
@@ -366,48 +349,20 @@ class JobTodayWebhookScraper:
             raise Exception(f"Could not load section {section_name}")
         
         # Give extra time for dynamic content
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         
         # Count candidates
         candidate_button_selector = 'button:has(img[alt$="\'s avatar"])'
         logger.info(f"Looking for candidates with selector: {candidate_button_selector}")
         
         try:
-            # Wait for candidates to appear
             await self.page.wait_for_selector(candidate_button_selector, timeout=15000)
             total_candidates = await self.page.locator(candidate_button_selector).count()
             logger.info(f"Found {total_candidates} candidate buttons")
         except PlaywrightTimeout:
             logger.warning(f"No candidates found in '{section_name}' section")
             print(f"   ! No candidates found in '{section_name}' section")
-            
-            # Try alternative selectors
-            alt_selectors = [
-                'button:has(img[alt*="avatar"])',
-                'button img[alt*="avatar"]',
-                '[class*="candidate"]',
-                'button:has-text("Applied on")'
-            ]
-            
-            total_candidates = 0
-            for alt_sel in alt_selectors:
-                try:
-                    count = await self.page.locator(alt_sel).count()
-                    if count > 0:
-                        logger.info(f"Found {count} elements with alternative selector: {alt_sel}")
-                        total_candidates = count
-                        candidate_button_selector = alt_sel
-                        break
-                except:
-                    continue
-            
-            if total_candidates == 0:
-                # Take screenshot and return
-                try:
-                    await self.page.screenshot(path=f'/app/data/debug_no_candidates_{section_name}.png', full_page=True)
-                except:
-                    pass
-                return
+            return
         
         if hasattr(self, 'progress_tracker'):
             self.progress_tracker.update(total=total_candidates)
@@ -420,7 +375,7 @@ class JobTodayWebhookScraper:
             try:
                 logger.info(f"{'='*50}")
                 logger.info(f"Processing candidate {i+1}/{total_candidates}")
-                print(f"\n--- Starting candidate {i+1}/{total_candidates} ---")
+                print(f"\n--- Processing candidate {i+1}/{total_candidates} ---")
                 
                 if hasattr(self, 'progress_tracker'):
                     self.progress_tracker.update(
@@ -428,15 +383,30 @@ class JobTodayWebhookScraper:
                         processed=i
                     )
                 
-                # CRITICAL: Always reload the list page before accessing candidate
-                logger.info(f"Reloading list page: {section_url}")
-                await self.page.goto(section_url, wait_until='load', timeout=60000)
-                await self.wait_for_stable_page()
-                await asyncio.sleep(3)
-                
-                # Wait for candidates to load
-                logger.info("Waiting for candidate buttons to appear...")
-                await self.page.wait_for_selector(candidate_button_selector, timeout=30000)
+                # Navigate back to list if we're not on it (after viewing a profile)
+                if i > 0:
+                    logger.info("Navigating back to list view...")
+                    
+                    # Try browser back button first (faster)
+                    try:
+                        await self.page.go_back(wait_until='domcontentloaded', timeout=30000)
+                        logger.info("Used browser back button")
+                        await asyncio.sleep(2)
+                    except:
+                        # Fallback to direct navigation
+                        logger.info("Back button failed, using direct navigation")
+                        await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
+                        await asyncio.sleep(3)
+                    
+                    # Wait for list to be ready
+                    try:
+                        await self.page.wait_for_selector(candidate_button_selector, timeout=20000)
+                        logger.info("List reloaded successfully")
+                    except:
+                        logger.error("Could not reload list, trying full page reload")
+                        await self.page.goto(section_url, wait_until='networkidle', timeout=90000)
+                        await asyncio.sleep(3)
+                        await self.page.wait_for_selector(candidate_button_selector, timeout=20000)
                 
                 # Verify we still have enough candidates
                 current_count = await self.page.locator(candidate_button_selector).count()
@@ -486,7 +456,7 @@ class JobTodayWebhookScraper:
                 
                 try:
                     await candidate_button.click(timeout=30000)
-                    logger.info("Click successful")
+                    logger.info("Click successful, waiting for profile...")
                 except Exception as click_error:
                     logger.error(f"Click failed: {click_error}")
                     print(f"   ✗ Click failed: {click_error}")
@@ -505,12 +475,6 @@ class JobTodayWebhookScraper:
                 except PlaywrightTimeout:
                     logger.error("Profile load timeout")
                     print(f"   ✗ Profile timeout, skipping")
-                    
-                    # Screenshot for debugging
-                    try:
-                        await self.page.screenshot(path=f'/app/data/debug_profile_timeout_{i}.png', full_page=True)
-                    except:
-                        pass
                     continue
                 
                 # Remove popups
@@ -544,7 +508,15 @@ class JobTodayWebhookScraper:
                 logger.error(f"Error processing candidate {i+1}: {e}")
                 logger.error(traceback.format_exc())
                 print(f"   ✗ Error processing candidate {i+1}: {e}")
-                # Continue to next candidate
+                
+                # Try to recover by going back to list
+                try:
+                    logger.info("Attempting to recover by navigating back to list...")
+                    await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
+                    await asyncio.sleep(3)
+                except:
+                    logger.error("Could not recover, continuing to next candidate")
+                
                 continue
         
         logger.info(f"Finished section: {section_name}")
