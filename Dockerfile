@@ -67,6 +67,9 @@ EXPOSE 10000
 
 # Set environment variables
 ENV PORT=10000
+ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
 
 # Run the application with better error handling
-CMD gunicorn --bind 0.0.0.0:$PORT --timeout 1800 --workers 1 --threads 1 --log-level info --access-logfile - --error-logfile - scraper_api:app
+# Increased timeout to 1800s (30 minutes) for long scraping sessions
+# Reduced worker memory to prevent OOM kills
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 1800 --workers 1 --threads 1 --worker-tmp-dir /dev/shm --log-level info --access-logfile - --error-logfile - scraper_api:app

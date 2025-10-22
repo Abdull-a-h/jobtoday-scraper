@@ -363,13 +363,11 @@ class JobTodayWebhookScraper:
                     print("   ⚠ Session expired, re-authenticating...")
                     if not await self.login_with_retry(max_attempts=2):
                         raise Exception("Re-login failed")
-                    # Try navigating again after login
                     await self.page.goto(section_url, wait_until='domcontentloaded', timeout=90000)
                     await asyncio.sleep(5)
                 
-                # Wait for the list container with multiple attempts
+                # Wait for the list container
                 list_container_selector = 'div.col-span-1.overflow-y-auto'
-                candidate_button_selector = f'button:has(img[alt$="\'s avatar"])'
                 
                 try:
                     await self.page.wait_for_selector(list_container_selector, timeout=45000)
@@ -379,7 +377,7 @@ class JobTodayWebhookScraper:
                 except PlaywrightTimeout:
                     print(f"   ⚠ List container not found (attempt {attempt})")
                     
-                    # Try alternative selectors instead of screenshot
+                    # Try alternative selectors
                     alt_selectors = [
                         'div.overflow-y-auto',
                         '[class*="overflow-y-auto"]',
@@ -419,7 +417,11 @@ class JobTodayWebhookScraper:
         print("   → Waiting for candidates to load...")
         await asyncio.sleep(5)
         
-        total_candidates_in_section = await self.page.locator(candidate_button_selector).count()
+        try:
+            total_candidates_in_section = await self.page.locator(candidate_button_selector).count()
+        except Exception as e:
+            print(f"   ✗ Error counting candidates: {e}")
+            total_candidates_in_section = 0
         
         # Update progress with total
         if hasattr(self, 'progress_tracker'):
@@ -427,239 +429,260 @@ class JobTodayWebhookScraper:
 
         if total_candidates_in_section == 0:
             print(f"   ! No candidates found in the '{section_name}' section.")
-            page_content = await self.page.content()
-            if 'no applicants' in page_content.lower() or 'no candidates' in page_content.lower():
-                print(f"   ! Section appears to be empty (no applicants message found)")
-            else:
-                print(f"   ⚠ Page loaded but candidate selector didn't match")
-                # Don't take screenshot - just log
-                print(f"   → Current URL: {self.page.url}")
             return
 
         print(f"   ✓ Found {total_candidates_in_section} candidates.")
 
+        # Process candidates one by one
         for i in range(total_candidates_in_section):
             candidate_name = f"Candidate {i+1}"
-            application_date = "N/A"
-            max_retries = 2
-            retry_count = 0
-            success = False
             
-            while retry_count < max_retries and not success:
+            try:
+                print(f"\n--- Starting candidate {i+1}/{total_candidates_in_section} ---")
+                
+                # Update heartbeat before processing each candidate
+                if hasattr(self, 'progress_tracker'):
+                    self.progress_tracker.update(
+                        candidate=f"Loading candidate {i+1}",
+                        processed=i
+                    )
+                
+                # Re-check if page is still valid
+                if self.page.is_closed():
+                    print("   ! Browser has closed unexpectedly. Halting.")
+                    return
+                
+                # Try to get candidate button with timeout
                 try:
-                    await self.page.wait_for_selector(candidate_button_selector, timeout=60000)
-                    candidate_button = self.page.locator(candidate_button_selector).nth(i)
-                    candidate_name = await candidate_button.locator('.font-bold').first.inner_text(timeout=15000)
-                    
-                    # Update progress
-                    if hasattr(self, 'progress_tracker'):
-                        self.progress_tracker.update(
-                            candidate=candidate_name,
-                            processed=i
-                        )
-                    
-                    if candidate_name in self.processed_names:
-                        print(f"--- Skipping {i+1}/{total_candidates_in_section}: {candidate_name} (already processed) ---")
-                        success = True
-                        break
-                    
-                    try:
-                        application_date_locator = candidate_button.locator('p:has-text("Applied on")')
-                        if await application_date_locator.count() > 0:
-                            application_date = await application_date_locator.inner_text()
-                    except Exception:
-                        application_date = "N/A"
-
-                    retry_suffix = f" (Retry {retry_count})" if retry_count > 0 else ""
-                    print(f"--- Processing {i+1}/{total_candidates_in_section}: {candidate_name}{retry_suffix} ---")
-                    
-                    # Try to click with increased timeout
-                    await candidate_button.click(timeout=45000)
-                    
-                    profile_view_selector = 'button:has-text("Chat with")'
-                    print("   → Waiting for profile details to load...")
-                    await self.page.wait_for_selector(profile_view_selector, timeout=60000)
-                    print("   ✓ Profile details loaded.")
-
-                    await self.page.evaluate('document.querySelectorAll("[id^=intercom-container], .intercom-lightweight-app").forEach(el => el.remove())')
+                    await self.page.wait_for_selector(candidate_button_selector, timeout=30000)
+                except PlaywrightTimeout:
+                    print(f"   ⚠ Candidate buttons not found, may have navigated away. Returning to list...")
+                    await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
+                    await asyncio.sleep(5)
+                    await self.page.wait_for_selector(candidate_button_selector, timeout=30000)
+                
+                candidate_button = self.page.locator(candidate_button_selector).nth(i)
+                
+                # Get candidate name
+                try:
+                    candidate_name = await candidate_button.locator('.font-bold').first.inner_text(timeout=10000)
+                    print(f"   → Candidate name: {candidate_name}")
+                except Exception as e:
+                    print(f"   ⚠ Could not get candidate name: {e}")
+                    candidate_name = f"Candidate {i+1}"
+                
+                # Check if already processed
+                if candidate_name in self.processed_names:
+                    print(f"   ✓ Skipping (already processed)")
+                    continue
+                
+                # Update progress with candidate name
+                if hasattr(self, 'progress_tracker'):
+                    self.progress_tracker.update(candidate=candidate_name)
+                
+                # Get application date
+                application_date = "N/A"
+                try:
+                    application_date_locator = candidate_button.locator('p:has-text("Applied on")')
+                    if await application_date_locator.count() > 0:
+                        application_date = await application_date_locator.inner_text(timeout=5000)
+                except Exception as e:
+                    print(f"   ⚠ Could not get application date: {e}")
+                
+                # Click candidate button
+                print(f"   → Clicking candidate button...")
+                try:
+                    await candidate_button.click(timeout=30000)
+                    print(f"   ✓ Clicked")
+                except Exception as e:
+                    print(f"   ✗ Failed to click: {e}")
+                    continue
+                
+                # Wait for profile to load
+                profile_view_selector = 'button:has-text("Chat with")'
+                print("   → Waiting for profile details to load...")
+                
+                try:
+                    await self.page.wait_for_selector(profile_view_selector, timeout=45000)
+                    print("   ✓ Profile details loaded")
+                except PlaywrightTimeout:
+                    print(f"   ✗ Profile did not load within timeout")
+                    # Try to go back to list
+                    await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
                     await asyncio.sleep(3)
-
+                    continue
+                
+                # Remove popups
+                try:
+                    await self.page.evaluate('document.querySelectorAll("[id^=intercom-container], .intercom-lightweight-app").forEach(el => el.remove())')
+                except:
+                    pass
+                
+                await asyncio.sleep(2)
+                
+                # Scrape details
+                print(f"   → Scraping candidate details...")
+                try:
                     details = await self.scrape_candidate_details(self.page.url, application_date)
                     self.candidates.append(details)
                     self.processed_names.add(candidate_name)
-                    print(f"   + Scraped: {details.get('name', 'N/A')}")
+                    print(f"   ✓ Scraped: {details.get('name', 'N/A')}")
                     
                     # Update progress after successful scrape
                     if hasattr(self, 'progress_tracker'):
                         self.progress_tracker.update(processed=i+1)
-                    
-                    success = True
-                
-                except PlaywrightTimeout as e:
-                    retry_count += 1
-                    error_msg = str(e).splitlines()[0]
-                    
-                    if retry_count < max_retries:
-                        print(f"   ⚠ Timeout occurred on candidate {i+1} ({candidate_name}): {error_msg}")
-                        print(f"   → Returning to list view and retrying (attempt {retry_count + 1}/{max_retries})...")
-                        
-                        try:
-                            await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
-                            await asyncio.sleep(5)
-                            await self.page.wait_for_selector(candidate_button_selector, timeout=45000)
-                            await asyncio.sleep(3)
-                        except Exception as nav_error:
-                            print(f"   ✗ Error navigating back to list: {nav_error}")
-                            break
-                    else:
-                        print(f"   ✗ Failed to scrape candidate {i+1} ({candidate_name}) after {max_retries} attempts: {error_msg}")
-                        # Don't take screenshot - just log the error
-                        print(f"   → Last URL: {self.page.url if not self.page.is_closed() else 'Page closed'}")
                         
                 except Exception as e:
-                    retry_count += 1
-                    error_msg = str(e).splitlines()[0]
-                    
-                    if retry_count < max_retries:
-                        print(f"   ⚠ Error on candidate {i+1} ({candidate_name}): {error_msg}")
-                        print(f"   → Returning to list view and retrying (attempt {retry_count + 1}/{max_retries})...")
-                        
-                        try:
-                            await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
-                            await asyncio.sleep(5)
-                            await self.page.wait_for_selector(candidate_button_selector, timeout=45000)
-                            await asyncio.sleep(3)
-                        except Exception as nav_error:
-                            print(f"   ✗ Error navigating back to list: {nav_error}")
-                            break
-                    else:
-                        print(f"   ✗ Failed to scrape candidate {i+1} ({candidate_name}) after {max_retries} attempts: {error_msg}")
-                        # Don't take screenshot - just log
-                        print(f"   → Last URL: {self.page.url if not self.page.is_closed() else 'Page closed'}")
+                    print(f"   ✗ Error scraping details: {e}")
+                    import traceback
+                    print(f"   Traceback: {traceback.format_exc()[:500]}")
                 
-                finally:
-                    if self.page.is_closed():
-                        print("   ! Browser has closed unexpectedly. Halting.")
-                        return
+                # Return to list view for next candidate
+                print(f"   ← Returning to list view...")
+                try:
+                    await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
+                    await asyncio.sleep(3)
+                    print(f"   ✓ Back at list view")
+                except Exception as e:
+                    print(f"   ✗ Error returning to list: {e}")
+                    # Try to continue anyway
+                    await asyncio.sleep(5)
             
-            # After success or max retries, return to list view for next candidate
-            if success and candidate_name not in self.processed_names:
-                continue
-                
-            print(f"   ← Resetting to list view for next candidate...")
-            try:
-                await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
-                await asyncio.sleep(5)
             except Exception as e:
-                print(f"   ✗ Error resetting to list view: {e}")
-                # Continue anyway - don't break the loop
-                continue
+                print(f"   ✗ Unexpected error processing candidate {i+1}: {e}")
+                import traceback
+                print(f"   Traceback: {traceback.format_exc()[:500]}")
+                
+                # Try to recover by going back to list
+                try:
+                    if not self.page.is_closed():
+                        await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
+                        await asyncio.sleep(3)
+                except:
+                    print(f"   ✗ Could not recover, stopping section scraping")
+                    break
+        
+        print(f"\n✓ Finished processing section: {section_name}")
+        print(f"   Total candidates found: {total_candidates_in_section}")
+        print(f"   Successfully scraped: {len([c for c in self.candidates if c.get('name') != 'N/A'])}")
 
     async def scrape_candidate_details(self, candidate_url, application_date):
-        details = {'profile_url': candidate_url, 'application_date': application_date, 'job_role': self.job_role}
-        
-        profile_pane = self.page.locator('div.col-span-1.overflow-y-auto:has(button:has-text("Chat with"))')
-
-        async def get_text(locator, timeout=3000):
-            try: 
-                await locator.wait_for(timeout=timeout)
-                return await locator.inner_text()
-            except PlaywrightTimeout: 
-                return "N/A"
-
-        details['name'] = await get_text(profile_pane.locator('div.font-bold.text-2xl').first)
+        details = {
+            'profile_url': candidate_url, 
+            'application_date': application_date, 
+            'job_role': self.job_role
+        }
         
         try:
-            phone_container = profile_pane.locator('div.flex.items-center.gap-2.mt-2:has(img[src*="IconPhoneFilled28"])')
-            show_phone_button = profile_pane.locator('span.cursor-pointer.text-jt-blue-500:has-text("Show phone")')
+            profile_pane = self.page.locator('div.col-span-1.overflow-y-auto:has(button:has-text("Chat with"))')
+
+            async def get_text(locator, timeout=5000):
+                try: 
+                    await locator.wait_for(timeout=timeout, state='attached')
+                    text = await locator.inner_text(timeout=timeout)
+                    return text if text else "N/A"
+                except Exception as e:
+                    return "N/A"
+
+            # Get name
+            print(f"      → Getting name...")
+            details['name'] = await get_text(profile_pane.locator('div.font-bold.text-2xl').first)
             
-            max_attempts = 3
-            phone_number = "N/A"
-            button_clicked = False
-            
-            if await show_phone_button.count() > 0:
-                print("   → 'Show phone' button found. Attempting to reveal number...")
+            # Get phone number
+            print(f"      → Getting phone...")
+            try:
+                phone_container = profile_pane.locator('div.flex.items-center.gap-2.mt-2:has(img[src*="IconPhoneFilled28"])')
+                show_phone_button = profile_pane.locator('span.cursor-pointer.text-jt-blue-500:has-text("Show phone")')
                 
-                try:
-                    await show_phone_button.click(timeout=5000)
-                    button_clicked = True
-                    print(f"   → Button clicked, waiting for phone number to load...")
-                except PlaywrightTimeout:
-                    print(f"   ⚠ Could not click button, will try to read number anyway...")
+                phone_number = "N/A"
                 
-                for attempt in range(1, max_attempts + 1):
-                    await asyncio.sleep(2)
+                if await show_phone_button.count() > 0:
+                    try:
+                        await show_phone_button.click(timeout=5000)
+                        await asyncio.sleep(2)
+                    except:
+                        pass
                     
-                    phone_span = phone_container.locator('span').first
-                    phone_text = await phone_span.text_content()
-                    phone_number = phone_text.strip() if phone_text else ""
-                    
-                    if "Show phone" in phone_number:
-                        phone_number = phone_number.replace("Show phone", "").strip()
-                    
-                    if phone_number and '…' not in phone_number and len(phone_number) >= 9:
-                        print(f"   ✓ Phone number scraped: {phone_number}")
-                        break
-                    else:
-                        print(f"   ⚠ Attempt {attempt}: Still loading or partial ('{phone_number}'), waiting...")
-                        
-                        if not button_clicked and attempt < max_attempts:
-                            button_count = await show_phone_button.count()
-                            if button_count > 0:
-                                try:
-                                    print(f"   → Retrying button click...")
-                                    await show_phone_button.click(timeout=3000)
-                                    button_clicked = True
-                                except:
-                                    pass
-                
-                if not phone_number or '…' in phone_number or len(phone_number) < 9:
-                    print(f"   ✗ Failed to get complete phone number after {max_attempts} attempts. Got: {phone_number}")
-                    details['phone'] = phone_number if phone_number else "N/A"
+                    # Try to get phone number
+                    for attempt in range(3):
+                        try:
+                            phone_span = phone_container.locator('span').first
+                            phone_text = await phone_span.text_content(timeout=3000)
+                            phone_number = phone_text.strip() if phone_text else ""
+                            
+                            if "Show phone" in phone_number:
+                                phone_number = phone_number.replace("Show phone", "").strip()
+                            
+                            if phone_number and '…' not in phone_number and len(phone_number) >= 9:
+                                break
+                            
+                            await asyncio.sleep(1)
+                        except:
+                            break
                 else:
-                    details['phone'] = phone_number
-            else:
-                phone_span = phone_container.locator('span').first
-                phone_text = await phone_span.text_content()
-                phone_number = phone_text.strip() if phone_text else "N/A"
-                details['phone'] = phone_number
-                print(f"   ✓ Phone number already visible: {phone_number}")
+                    phone_span = phone_container.locator('span').first
+                    phone_text = await phone_span.text_content(timeout=3000)
+                    phone_number = phone_text.strip() if phone_text else "N/A"
                 
-        except Exception as e: 
-            print(f"      ! Error scraping phone number: {str(e).splitlines()[0]}")
-            details['phone'] = "N/A"
-        
-        details['email'] = await get_text(profile_pane.locator('a[href^="mailto:"]').first)
-        details['location'] = await get_text(profile_pane.locator('div:has(img[src*="IconPinThinBlack20"]) > span').first)
-        
-        try:
-            about_text_div = profile_pane.locator('hr.my-6 + div.px-4.break-word').first
-            details['about'] = await get_text(about_text_div)
-        except Exception:
-            details['about'] = "N/A"
-        
-        try:
-            certs_header = profile_pane.locator('div.font-bold.text-xl:has-text("Certificates")').first
-            certs_block = certs_header.locator('xpath=./following-sibling::div[1]')
-            details['certificates'] = await get_text(certs_block)
-        except Exception:
-            details['certificates'] = "N/A"
+                details['phone'] = phone_number
+                print(f"      ✓ Phone: {phone_number}")
+                        
+            except Exception as e: 
+                print(f"      ⚠ Error getting phone: {str(e)[:100]}")
+                details['phone'] = "N/A"
             
-        try:
-            exp_header = profile_pane.locator('div.font-bold.text-xl:has-text("Experience")').first
-            experience_block = exp_header.locator('xpath=./following-sibling::div[1]')
-            details['experience'] = await get_text(experience_block)
-        except Exception:
-            details['experience'] = "N/A"
+            # Get email
+            print(f"      → Getting email...")
+            details['email'] = await get_text(profile_pane.locator('a[href^="mailto:"]').first)
             
-        try:
-            lang_header = profile_pane.locator('div.font-bold.text-xl:has-text("Languages")').first
-            languages_block = lang_header.locator('xpath=./following-sibling::div[1]')
-            details['languages'] = await get_text(languages_block)
-        except Exception:
-            details['languages'] = "N/A"
+            # Get location
+            print(f"      → Getting location...")
+            details['location'] = await get_text(profile_pane.locator('div:has(img[src*="IconPinThinBlack20"]) > span').first)
+            
+            # Get about
+            print(f"      → Getting about...")
+            try:
+                about_text_div = profile_pane.locator('hr.my-6 + div.px-4.break-word').first
+                details['about'] = await get_text(about_text_div)
+            except Exception:
+                details['about'] = "N/A"
+            
+            # Get certificates
+            print(f"      → Getting certificates...")
+            try:
+                certs_header = profile_pane.locator('div.font-bold.text-xl:has-text("Certificates")').first
+                certs_block = certs_header.locator('xpath=./following-sibling::div[1]')
+                details['certificates'] = await get_text(certs_block)
+            except Exception:
+                details['certificates'] = "N/A"
+                
+            # Get experience
+            print(f"      → Getting experience...")
+            try:
+                exp_header = profile_pane.locator('div.font-bold.text-xl:has-text("Experience")').first
+                experience_block = exp_header.locator('xpath=./following-sibling::div[1]')
+                details['experience'] = await get_text(experience_block)
+            except Exception:
+                details['experience'] = "N/A"
+                
+            # Get languages
+            print(f"      → Getting languages...")
+            try:
+                lang_header = profile_pane.locator('div.font-bold.text-xl:has-text("Languages")').first
+                languages_block = lang_header.locator('xpath=./following-sibling::div[1]')
+                details['languages'] = await get_text(languages_block)
+            except Exception:
+                details['languages'] = "N/A"
 
-        return details
+            print(f"      ✓ All details scraped")
+            return details
+            
+        except Exception as e:
+            print(f"      ✗ Critical error in scrape_candidate_details: {e}")
+            import traceback
+            print(f"      Traceback: {traceback.format_exc()[:500]}")
+            # Return partial details
+            return details
 
     def get_existing_profiles(self):
         """Fetch all existing profile URLs from Airtable to check for duplicates"""
