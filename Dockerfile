@@ -68,6 +68,9 @@ EXPOSE 10000
 # Set environment variables
 ENV PORT=10000
 ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
+# Add this to your ENV section
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
 
 # Run the application with better error handling
 # Increased timeout to 1800s (30 minutes) for long scraping sessions
