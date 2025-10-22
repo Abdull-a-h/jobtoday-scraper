@@ -336,6 +336,8 @@ class JobTodayWebhookScraper:
         return False
 
     async def scrape_section(self, section_name):
+        if hasattr(self, 'progress_tracker'):
+            self.progress_tracker.update(section=section_name)
         section_url = f"{self.base_url}/jobs/{self.job_id}/{section_name}"
         print(f"\n→ Processing section: {section_url}")
         
@@ -427,9 +429,16 @@ class JobTodayWebhookScraper:
             return
 
         print(f"   ✓ Found {total_candidates_in_section} candidates.")
+        if hasattr(self, 'progress_tracker'):
+            self.progress_tracker.update(total=total_candidates_in_section)
 
         for i in range(total_candidates_in_section):
             candidate_name = f"Candidate {i+1}"
+            if hasattr(self, 'progress_tracker'):
+                self.progress_tracker.update(
+                    candidate=candidate_name,
+                    processed=i
+                    )
             application_date = "N/A"
             max_retries = 2
             retry_count = 0
@@ -473,6 +482,8 @@ class JobTodayWebhookScraper:
                     print(f"   + Scraped: {details.get('name', 'N/A')}")
                     
                     success = True
+                    if hasattr(self, 'progress_tracker'):
+                        self.progress_tracker.update(processed=i+1)
                 
                 except PlaywrightTimeout as e:
                     retry_count += 1
