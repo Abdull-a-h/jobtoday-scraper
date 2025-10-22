@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 import requests
 import logging
+import traceback
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -818,50 +819,60 @@ class JobTodayWebhookScraper:
             if not session_loaded:
                 if not await self.login_with_retry(max_attempts=3):
                     print("✗ Login failed")
+                    logger.error("Login failed after retries")
                     return
                 await self.save_session()
             else:
                 print("→ Verifying session...")
-                await self.page.goto(self.base_url, wait_until='domcontentloaded')
+                logger.info("Verifying existing session...")
+                await self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=60000)
                 await asyncio.sleep(3)
                 
                 if '/auth/login' in self.page.url:
                     print("   Session expired, re-login...")
+                    logger.warning("Session expired, re-authenticating")
                     if not await self.login_with_retry(max_attempts=3):
                         print("✗ Re-login failed")
+                        logger.error("Re-login failed")
                         return
                     await self.save_session()
                 else:
                     print("   ✓ Session valid")
+                    logger.info("Session still valid")
 
+            # Scrape job role
             await self.scrape_job_role()
 
-            print("\n→ Navigating to applicants...")
-            incoming_url = f"{self.base_url}/jobs/{self.job_id}/incoming"
+            # REMOVED: Don't navigate here - let scrape_section handle it
+            logger.info("Ready to start scraping sections...")
+            print("\n→ Starting to scrape sections...")
 
-            try:
-                await self.page.goto(incoming_url, wait_until='load', timeout=60000)
-                await self.wait_for_stable_page()
-                await self.page.wait_for_selector('div.col-span-1.overflow-y-auto', timeout=30000)
-                print("   ✓ At applicants page")
-            except Exception as e:
-                print(f"   ✗ Navigation failed: {e}")
-                raise
-
+            # Scrape sections
             sections = ['recommended', 'incoming']
             for section in sections:
                 if self.page.is_closed():
+                    logger.error("Page closed unexpectedly")
                     break
+                
+                logger.info(f"About to scrape section: {section}")
                 await self.scrape_section(section)
 
             if not self.candidates:
                 print("\n✗ No candidates scraped")
+                logger.warning("No candidates were scraped")
                 return
 
+            # Save results
+            logger.info("Saving results...")
             await self.save_to_json()
             await self.export_to_csv()
             
+            # Push to Airtable
+            logger.info("Pushing to Airtable...")
             new_candidates = self.push_to_airtable()
+            
+            # Send to n8n
+            logger.info("Sending to n8n webhook...")
             self.send_to_n8n_webhook(new_candidates)
 
             print("\n" + "="*50)
@@ -869,23 +880,28 @@ class JobTodayWebhookScraper:
             print(f"  Total: {len(self.candidates)}")
             print(f"  New: {len(new_candidates)}")
             print("="*50)
+            
+            logger.info(f"Scraping complete - Total: {len(self.candidates)}, New: {len(new_candidates)}")
 
         except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Fatal error in run(): {error_msg}")
+            logger.error(traceback.format_exc())
             print(f"\n✗ Fatal error: {e}")
             
+            # Send error to n8n
             if self.n8n_webhook_url:
                 try:
                     error_payload = {
                         'timestamp': datetime.now().isoformat(),
                         'status': 'error',
-                        'error_message': str(e)
+                        'error_message': error_msg
                     }
                     requests.post(self.n8n_webhook_url, json=error_payload, timeout=10)
-                except:
-                    pass
-                    
-            import traceback
-            traceback.print_exc()
+                    logger.info("Error notification sent to n8n")
+                except Exception as webhook_error:
+                    logger.error(f"Could not send error to n8n: {webhook_error}")
+                        
         finally:
             await self.close()
 
