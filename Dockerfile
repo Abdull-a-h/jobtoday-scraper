@@ -4,7 +4,7 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies required by Playwright (comprehensive list)
+# Install system dependencies required by Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -52,15 +52,16 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Install Playwright and browsers BEFORE copying application code
+# This ensures consistent installation paths
+RUN playwright install chromium
+RUN playwright install-deps chromium
+
+# Copy application code AFTER installing Playwright
 COPY . .
 
 # Create directories for session and output files
 RUN mkdir -p /app/data
-
-# Install Playwright browsers AFTER copying application code
-# This ensures browsers are installed with correct permissions and paths
-RUN python -m playwright install chromium --with-deps
 
 # Expose port
 EXPOSE 10000
@@ -68,11 +69,15 @@ EXPOSE 10000
 # Set environment variables
 ENV PORT=10000
 ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
-# Add this to your ENV section
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
 
-# Run the application with better error handling
-# Increased timeout to 1800s (30 minutes) for long scraping sessions
-# Reduced worker memory to prevent OOM kills
-CMD gunicorn --bind 0.0.0.0:$PORT --timeout 1800 --workers 1 --threads 1 --worker-tmp-dir /dev/shm --log-level info --access-logfile - --error-logfile - scraper_api:app
+# Run the application
+CMD gunicorn --bind 0.0.0.0:$PORT \
+    --timeout 1800 \
+    --workers 1 \
+    --threads 1 \
+    --worker-tmp-dir /dev/shm \
+    --log-level info \
+    --access-logfile - \
+    --error-logfile - \
+    scraper_api:app

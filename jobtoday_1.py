@@ -52,6 +52,7 @@ class JobTodayWebhookScraper:
             
             logger.info("Launching Chromium browser...")
             
+            # Browser args for containerized environments
             browser_args = [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -65,17 +66,47 @@ class JobTodayWebhookScraper:
                 '--disable-blink-features=AutomationControlled'
             ]
             
-            self.browser = await self.playwright.chromium.launch(
-                headless=headless,
-                args=browser_args
-            )
+            logger.info(f"Browser args: {browser_args}")
+            logger.info(f"Headless mode: {headless}")
             
+            # Check if executable path is set
+            import os
+            browsers_path = os.getenv('PLAYWRIGHT_BROWSERS_PATH', 'default')
+            logger.info(f"PLAYWRIGHT_BROWSERS_PATH: {browsers_path}")
+            
+            try:
+                self.browser = await self.playwright.chromium.launch(
+                    headless=headless,
+                    args=browser_args
+                )
+                logger.info("✓ Browser launched successfully")
+            except Exception as launch_error:
+                logger.error(f"Browser launch failed: {launch_error}")
+                
+                # Try to find chromium executable
+                logger.info("Attempting to locate Chromium executable...")
+                try:
+                    import subprocess
+                    result = subprocess.run(['which', 'chromium'], capture_output=True, text=True)
+                    logger.info(f"Chromium location check: {result.stdout}")
+                    
+                    result = subprocess.run(['playwright', 'install', '--dry-run', 'chromium'], 
+                                          capture_output=True, text=True)
+                    logger.info(f"Playwright status: {result.stdout}")
+                except Exception as check_error:
+                    logger.error(f"Diagnostic check failed: {check_error}")
+                
+                raise launch_error
+            
+            logger.info("Creating browser context...")
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
             
             await self.context.grant_permissions(['geolocation'], origin=self.base_url)
+            
+            logger.info("Creating new page...")
             self.page = await self.context.new_page()
             
             logger.info("✓ Browser initialized successfully")
@@ -83,6 +114,8 @@ class JobTodayWebhookScraper:
             
         except Exception as e:
             logger.error(f"✗ Browser initialization failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise
         
     async def login(self):
