@@ -122,7 +122,7 @@ class JobTodayWebhookScraper:
     async def login(self):
         try:
             print("→ Navigating to JobToday to log in...")
-            await self.page.goto(f"{self.base_url}/auth/login", wait_until='domcontentloaded', timeout=60000)
+            await self.page.goto(f"{self.base_url}/auth/login", wait_until='domcontentloaded', timeout=120000)
             await asyncio.sleep(3)
             
             post_login_selectors = [
@@ -135,7 +135,7 @@ class JobTodayWebhookScraper:
             already_logged_in = False
             for selector in post_login_selectors:
                 try:
-                    element = await self.page.wait_for_selector(selector, timeout=5000, state='attached')
+                    element = await self.page.wait_for_selector(selector, timeout=10000, state='attached')
                     if element and await element.is_visible():
                         print("✓ Already logged in.")
                         already_logged_in = True
@@ -149,7 +149,7 @@ class JobTodayWebhookScraper:
             print("→ Not logged in. Proceeding with login...")
             
             try:
-                await self.page.wait_for_selector('input[type="email"]', timeout=10000, state='visible')
+                await self.page.wait_for_selector('input[type="email"]', timeout=20000, state='visible')
             except:
                 current_url = self.page.url
                 if '/auth/login' not in current_url:
@@ -248,11 +248,11 @@ class JobTodayWebhookScraper:
         try:
             print("\n→ Scraping job role...")
             main_job_url = f"{self.base_url}/jobs/{self.job_id}"
-            await self.page.goto(main_job_url, wait_until='domcontentloaded', timeout=90000)
+            await self.page.goto(main_job_url, wait_until='domcontentloaded', timeout=180000)
             await asyncio.sleep(5)
             
             role_selector = 'div.bg-white.rounded-b-xl div.text-black.font-bold.mb-1'
-            await self.page.wait_for_selector(role_selector, timeout=20000)
+            await self.page.wait_for_selector(role_selector, timeout=40000)
             
             role_element = self.page.locator(role_selector).first
             self.job_role = await role_element.inner_text()
@@ -266,7 +266,7 @@ class JobTodayWebhookScraper:
             print(f"   → Using default role: {self.job_role}")
             return self.job_role
 
-    async def wait_for_stable_page(self, timeout=10000):
+    async def wait_for_stable_page(self, timeout=20000):
         """Wait for page to stop navigating/loading"""
         try:
             # Wait a bit for any pending navigations
@@ -275,7 +275,7 @@ class JobTodayWebhookScraper:
             # Check if page is still loading
             for _ in range(5):
                 try:
-                    await self.page.wait_for_load_state('networkidle', timeout=5000)
+                    await self.page.wait_for_load_state('networkidle', timeout=10000)
                     break
                 except:
                     await asyncio.sleep(1)
@@ -283,6 +283,8 @@ class JobTodayWebhookScraper:
             return True
         except:
             return False
+        
+
 
     async def scrape_section(self, section_name):
         """Improved section scraping with better state management"""
@@ -301,7 +303,7 @@ class JobTodayWebhookScraper:
                 logger.info(f"Loading page attempt {attempt}/3")
                 
                 # Navigate to section
-                await self.page.goto(section_url, wait_until='networkidle', timeout=90000)
+                await self.page.goto(section_url, wait_until='networkidle', timeout=180000)
                 logger.info("Page loaded with networkidle")
                 await asyncio.sleep(3)
                 
@@ -314,7 +316,7 @@ class JobTodayWebhookScraper:
                     logger.warning("Session expired, re-authenticating")
                     if not await self.login_with_retry(max_attempts=2):
                         raise Exception("Re-login failed")
-                    await self.page.goto(section_url, wait_until='networkidle', timeout=90000)
+                    await self.page.goto(section_url, wait_until='networkidle', timeout=180000)
                     await asyncio.sleep(3)
                 
                 # Wait for list container
@@ -322,7 +324,7 @@ class JobTodayWebhookScraper:
                 logger.info(f"Waiting for list container: {list_container_selector}")
                 
                 try:
-                    await self.page.wait_for_selector(list_container_selector, timeout=30000)
+                    await self.page.wait_for_selector(list_container_selector, timeout=60000)
                     container_count = await self.page.locator(list_container_selector).count()
                     logger.info(f"✓ Found {container_count} list containers")
                     print("   ✓ List container found")
@@ -356,7 +358,7 @@ class JobTodayWebhookScraper:
         logger.info(f"Looking for candidates with selector: {candidate_button_selector}")
         
         try:
-            await self.page.wait_for_selector(candidate_button_selector, timeout=15000)
+            await self.page.wait_for_selector(candidate_button_selector, timeout=30000)
             total_candidates = await self.page.locator(candidate_button_selector).count()
             logger.info(f"Found {total_candidates} candidate buttons")
         except PlaywrightTimeout:
@@ -389,24 +391,24 @@ class JobTodayWebhookScraper:
                     
                     # Try browser back button first (faster)
                     try:
-                        await self.page.go_back(wait_until='domcontentloaded', timeout=30000)
+                        await self.page.go_back(wait_until='domcontentloaded', timeout=60000)
                         logger.info("Used browser back button")
                         await asyncio.sleep(2)
                     except:
                         # Fallback to direct navigation
                         logger.info("Back button failed, using direct navigation")
-                        await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
+                        await self.page.goto(section_url, wait_until='domcontentloaded', timeout=120000)
                         await asyncio.sleep(3)
                     
                     # Wait for list to be ready
                     try:
-                        await self.page.wait_for_selector(candidate_button_selector, timeout=20000)
+                        await self.page.wait_for_selector(candidate_button_selector, timeout=40000)
                         logger.info("List reloaded successfully")
                     except:
                         logger.error("Could not reload list, trying full page reload")
-                        await self.page.goto(section_url, wait_until='networkidle', timeout=90000)
+                        await self.page.goto(section_url, wait_until='networkidle', timeout=180000)
                         await asyncio.sleep(3)
-                        await self.page.wait_for_selector(candidate_button_selector, timeout=20000)
+                        await self.page.wait_for_selector(candidate_button_selector, timeout=40000)
                 
                 # Verify we still have enough candidates
                 current_count = await self.page.locator(candidate_button_selector).count()
@@ -424,7 +426,7 @@ class JobTodayWebhookScraper:
                 # Get candidate name
                 try:
                     candidate_name_elem = candidate_button.locator('.font-bold').first
-                    candidate_name = await candidate_name_elem.inner_text(timeout=10000)
+                    candidate_name = await candidate_name_elem.inner_text(timeout=20000)
                     logger.info(f"Candidate name: {candidate_name}")
                     print(f"   → Candidate name: {candidate_name}")
                 except Exception as name_error:
@@ -445,7 +447,7 @@ class JobTodayWebhookScraper:
                 try:
                     date_locator = candidate_button.locator('p:has-text("Applied on")')
                     if await date_locator.count() > 0:
-                        application_date = await date_locator.inner_text(timeout=5000)
+                        application_date = await date_locator.inner_text(timeout=10000)
                         logger.info(f"Application date: {application_date}")
                 except Exception as date_error:
                     logger.warning(f"Could not get application date: {date_error}")
@@ -455,7 +457,7 @@ class JobTodayWebhookScraper:
                 print(f"   → Clicking candidate...")
                 
                 try:
-                    await candidate_button.click(timeout=30000)
+                    await candidate_button.click(timeout=60000)
                     logger.info("Click successful, waiting for profile...")
                 except Exception as click_error:
                     logger.error(f"Click failed: {click_error}")
@@ -469,7 +471,7 @@ class JobTodayWebhookScraper:
                 logger.info(f"Waiting for profile to load: {profile_selector}")
                 
                 try:
-                    await self.page.wait_for_selector(profile_selector, timeout=30000)
+                    await self.page.wait_for_selector(profile_selector, timeout=60000)
                     logger.info("✓ Profile loaded")
                     print("   ✓ Profile loaded")
                 except PlaywrightTimeout:
@@ -512,7 +514,7 @@ class JobTodayWebhookScraper:
                 # Try to recover by going back to list
                 try:
                     logger.info("Attempting to recover by navigating back to list...")
-                    await self.page.goto(section_url, wait_until='domcontentloaded', timeout=60000)
+                    await self.page.goto(section_url, wait_until='domcontentloaded', timeout=120000)
                     await asyncio.sleep(3)
                 except:
                     logger.error("Could not recover, continuing to next candidate")
@@ -534,7 +536,7 @@ class JobTodayWebhookScraper:
         try:
             profile_pane = self.page.locator('div.col-span-1.overflow-y-auto:has(button:has-text("Chat with"))')
 
-            async def get_text(locator, timeout=5000):
+            async def get_text(locator, timeout=10000):
                 try: 
                     await locator.wait_for(timeout=timeout, state='attached')
                     text = await locator.inner_text(timeout=timeout)
@@ -552,20 +554,20 @@ class JobTodayWebhookScraper:
                 
                 if await show_button.count() > 0:
                     try:
-                        await show_button.click(timeout=5000)
+                        await show_button.click(timeout=10000)
                         await asyncio.sleep(2)
                     except:
                         pass
                     
                     phone_span = phone_container.locator('span').first
-                    phone_text = await phone_span.text_content(timeout=3000)
+                    phone_text = await phone_span.text_content(timeout=6000)
                     phone_number = phone_text.strip() if phone_text else "N/A"
                     
                     if "Show phone" in phone_number:
                         phone_number = phone_number.replace("Show phone", "").strip()
                 else:
                     phone_span = phone_container.locator('span').first
-                    phone_text = await phone_span.text_content(timeout=3000)
+                    phone_text = await phone_span.text_content(timeout=6000)
                     phone_number = phone_text.strip() if phone_text else "N/A"
                 
                 details['phone'] = phone_number
@@ -632,7 +634,7 @@ class JobTodayWebhookScraper:
                 if offset:
                     params['offset'] = offset
                 
-                response = requests.get(self.airtable_api_url, headers=headers, params=params, timeout=30)
+                response = requests.get(self.airtable_api_url, headers=headers, params=params, timeout=60)
                 
                 if response.status_code != 200:
                     print(f"   ⚠ Could not fetch records: {response.status_code}")
@@ -706,7 +708,7 @@ class JobTodayWebhookScraper:
                 batch = records[i:i+batch_size]
                 payload = {'records': batch}
                 
-                response = requests.post(self.airtable_api_url, json=payload, headers=headers, timeout=30)
+                response = requests.post(self.airtable_api_url, json=payload, headers=headers, timeout=60)
                 
                 if response.status_code == 200:
                     total_pushed += len(batch)
@@ -738,7 +740,7 @@ class JobTodayWebhookScraper:
                 'status': 'success'
             }
             
-            response = requests.post(self.n8n_webhook_url, json=payload, timeout=30)
+            response = requests.post(self.n8n_webhook_url, json=payload, timeout=60)
             
             if response.status_code in [200, 201, 204]:
                 print(f"✓ Sent {len(new_candidates)} to n8n")
@@ -797,7 +799,7 @@ class JobTodayWebhookScraper:
             else:
                 print("→ Verifying session...")
                 logger.info("Verifying existing session...")
-                await self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=60000)
+                await self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=120000)
                 await asyncio.sleep(3)
                 
                 if '/auth/login' in self.page.url:
@@ -869,7 +871,7 @@ class JobTodayWebhookScraper:
                         'status': 'error',
                         'error_message': error_msg
                     }
-                    requests.post(self.n8n_webhook_url, json=error_payload, timeout=10)
+                    requests.post(self.n8n_webhook_url, json=error_payload, timeout=20)
                     logger.info("Error notification sent to n8n")
                 except Exception as webhook_error:
                     logger.error(f"Could not send error to n8n: {webhook_error}")
