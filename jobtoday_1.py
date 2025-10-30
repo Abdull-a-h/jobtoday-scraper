@@ -1,6 +1,7 @@
 """
-JobToday Scraper - Robust Version
-Fixes navigation issues and improves state management
+JobToday Scraper - Complete Render Version
+Includes chat history, chat summary, popup removal, and all advanced features
+Optimized for containerized deployment on Render
 """
 import asyncio
 import json
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 import requests
 import logging
 import traceback
+import google.generativeai as genai
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -31,6 +33,9 @@ class JobTodayWebhookScraper:
         self.browser = None
         self.job_role = None
         
+        # Retry tracking for candidates
+        self.candidate_retry_attempts = {}
+        
         # Airtable setup
         self.airtable_token = os.getenv('AIRTABLE_PAT')
         self.airtable_base_id = os.getenv('AIRTABLE_BASE_ID')
@@ -40,10 +45,35 @@ class JobTodayWebhookScraper:
         # n8n webhook
         self.n8n_webhook_url = os.getenv('N8N_WEBHOOK_URL')
         
+        # Google Gemini API setup
+        self.gemini_api_key = os.getenv('GOOGLE_GEMINI')
+        
+        # Configuration logging
         if self.airtable_token and self.airtable_base_id:
             print("✓ Airtable configured")
+            logger.info("Airtable configured")
+        else:
+            print("⚠ Airtable not fully configured")
+            logger.warning("Airtable not fully configured")
+            
         if self.n8n_webhook_url:
             print("✓ n8n webhook configured")
+            logger.info("n8n webhook configured")
+        else:
+            print("⚠ n8n webhook not configured")
+            logger.warning("n8n webhook not configured")
+        
+        if self.gemini_api_key:
+            try:
+                genai.configure(api_key=self.gemini_api_key)
+                print("✓ Google Gemini API configured")
+                logger.info("Google Gemini API configured")
+            except Exception as e:
+                print(f"✗ Failed to configure Google Gemini: {e}")
+                logger.error(f"Failed to configure Google Gemini: {e}")
+        else:
+            print("⚠ Google Gemini not configured - chat summaries disabled")
+            logger.warning("Google Gemini not configured")
         
     async def initialize_browser(self, headless=True):
         """Initialize browser with Render-compatible settings"""
@@ -70,8 +100,6 @@ class JobTodayWebhookScraper:
             logger.info(f"Browser args: {browser_args}")
             logger.info(f"Headless mode: {headless}")
             
-            # Check if executable path is set
-            import os
             browsers_path = os.getenv('PLAYWRIGHT_BROWSERS_PATH', 'default')
             logger.info(f"PLAYWRIGHT_BROWSERS_PATH: {browsers_path}")
             
@@ -84,7 +112,7 @@ class JobTodayWebhookScraper:
             except Exception as launch_error:
                 logger.error(f"Browser launch failed: {launch_error}")
                 
-                # Try to find chromium executable
+                # Diagnostic checks
                 logger.info("Attempting to locate Chromium executable...")
                 try:
                     import subprocess
@@ -111,17 +139,19 @@ class JobTodayWebhookScraper:
             self.page = await self.context.new_page()
             
             logger.info("✓ Browser initialized successfully")
+            print("✓ Browser initialized")
             return True
             
         except Exception as e:
             logger.error(f"✗ Browser initialization failed: {e}")
-            import traceback
             logger.error(traceback.format_exc())
+            print(f"✗ Browser initialization failed: {e}")
             raise
         
     async def login(self):
         try:
             print("→ Navigating to JobToday to log in...")
+            logger.info("Navigating to login page")
             await self.page.goto(f"{self.base_url}/auth/login", wait_until='domcontentloaded', timeout=120000)
             await asyncio.sleep(3)
             
@@ -138,6 +168,7 @@ class JobTodayWebhookScraper:
                     element = await self.page.wait_for_selector(selector, timeout=10000, state='attached')
                     if element and await element.is_visible():
                         print("✓ Already logged in.")
+                        logger.info("Already logged in")
                         already_logged_in = True
                         break
                 except:
@@ -147,6 +178,7 @@ class JobTodayWebhookScraper:
                 return True
                 
             print("→ Not logged in. Proceeding with login...")
+            logger.info("Not logged in, proceeding with login")
             
             try:
                 await self.page.wait_for_selector('input[type="email"]', timeout=20000, state='visible')
@@ -154,27 +186,32 @@ class JobTodayWebhookScraper:
                 current_url = self.page.url
                 if '/auth/login' not in current_url:
                     print("✓ Already logged in (redirected).")
+                    logger.info("Already logged in (redirected)")
                     return True
                 raise Exception("Login form not found")
             
             email_input = self.page.locator('input[type="email"]')
             password_input = self.page.locator('input[type="password"]')
             
+            logger.info("Filling in credentials")
             await email_input.fill(self.email)
             await asyncio.sleep(1)
             await password_input.fill(self.password)
             await asyncio.sleep(1)
             
             print("→ Clicking submit button...")
+            logger.info("Submitting login form")
             await self.page.click('button[type="submit"]')
             
             print("→ Waiting for login to complete...")
+            logger.info("Waiting for login to complete")
             await asyncio.sleep(5)
             
             login_confirmed = False
             
             if '/auth/login' not in self.page.url:
                 login_confirmed = True
+                logger.info("Login confirmed - URL changed")
             
             if not login_confirmed:
                 for selector in post_login_selectors:
@@ -182,29 +219,35 @@ class JobTodayWebhookScraper:
                         count = await self.page.locator(selector).count()
                         if count > 0:
                             login_confirmed = True
+                            logger.info(f"Login confirmed - found element: {selector}")
                             break
                     except:
                         continue
             
             if login_confirmed:
                 print("✓ Login successful")
+                logger.info("✓ Login successful")
                 await asyncio.sleep(3)
                 return True
             else:
                 print(f"✗ Could not confirm login")
+                logger.error("Could not confirm login")
                 raise Exception("Could not confirm successful login")
             
         except Exception as e:
             print(f"✗ Login failed: {e}")
+            logger.error(f"Login failed: {e}")
             return False
 
     async def login_with_retry(self, max_attempts=3):
         for attempt in range(1, max_attempts + 1):
             print(f"\n→ Login attempt {attempt}/{max_attempts}")
+            logger.info(f"Login attempt {attempt}/{max_attempts}")
             success = await self.login()
             if success:
                 return True
             if attempt < max_attempts:
+                logger.info("Waiting before retry...")
                 await asyncio.sleep(10)
         return False
     
@@ -214,18 +257,20 @@ class JobTodayWebhookScraper:
             with open(filename, 'w') as f:
                 json.dump(storage, f)
             print(f"✓ Session saved to {filename}")
+            logger.info(f"Session saved to {filename}")
         except Exception as e:
             print(f"⚠ Could not save session: {e}")
+            logger.warning(f"Could not save session: {e}")
 
     async def load_session(self, filename='session.json'):
         try:
             if not os.path.exists(filename):
+                logger.info("No session file found")
                 return False
             
             with open(filename, 'r') as f:
                 storage_state = json.load(f)
             
-            # Close existing context and create new one with storage state
             if hasattr(self, 'context'):
                 await self.context.close()
             
@@ -239,14 +284,17 @@ class JobTodayWebhookScraper:
             self.page = await self.context.new_page()
             
             print(f"✓ Session loaded from {filename}")
+            logger.info(f"Session loaded from {filename}")
             return True
         except Exception as e:
             print(f"⚠ Could not load session: {e}")
+            logger.warning(f"Could not load session: {e}")
             return False
         
     async def scrape_job_role(self):
         try:
             print("\n→ Scraping job role...")
+            logger.info("Scraping job role")
             main_job_url = f"{self.base_url}/jobs/{self.job_id}"
             await self.page.goto(main_job_url, wait_until='domcontentloaded', timeout=180000)
             await asyncio.sleep(5)
@@ -258,36 +306,184 @@ class JobTodayWebhookScraper:
             self.job_role = await role_element.inner_text()
             
             print(f"   ✓ Job role scraped: {self.job_role}")
+            logger.info(f"Job role scraped: {self.job_role}")
             return self.job_role
             
         except Exception as e:
             print(f"   ⚠ Could not scrape job role: {e}")
+            logger.warning(f"Could not scrape job role: {e}")
             self.job_role = f"Job {self.job_id}"
             print(f"   → Using default role: {self.job_role}")
+            logger.info(f"Using default role: {self.job_role}")
             return self.job_role
 
-    async def wait_for_stable_page(self, timeout=20000):
-        """Wait for page to stop navigating/loading"""
+    async def dismiss_popups(self):
+        """Dismiss any popups that might interfere with scraping"""
         try:
-            # Wait a bit for any pending navigations
-            await asyncio.sleep(2)
+            logger.debug("Checking for popups to dismiss")
+            popup_handlers = [
+                {'selector': 'div:text-is("Not now")', 'action': 'click', 'name': '"Not now" button'},
+                {'selector': 'button:has-text("Got it")', 'action': 'click', 'name': 'Contact Limit popup'},
+                {'selector': 'button[aria-label="Close"]', 'action': 'click', 'name': 'Close button'},
+                {'selector': '[role="dialog"]', 'action': 'escape', 'name': 'Dialog (Escape key)'},
+                {'selector': '[id^=intercom-container], .intercom-lightweight-app, .intercom-messenger-frame', 
+                 'action': 'remove', 'name': 'Intercom widget'}
+            ]
             
-            # Check if page is still loading
-            for _ in range(5):
+            for handler in popup_handlers:
                 try:
-                    await self.page.wait_for_load_state('networkidle', timeout=10000)
-                    break
+                    elements = self.page.locator(handler['selector'])
+                    if await elements.count() > 0:
+                        if handler['action'] == 'click':
+                            for i in range(await elements.count()):
+                                try:
+                                    await elements.nth(i).click(timeout=5000, force=True)
+                                    logger.info(f"Dismissed {handler['name']}")
+                                    await asyncio.sleep(0.5)
+                                except:
+                                    pass
+                        elif handler['action'] == 'escape':
+                            try:
+                                await self.page.keyboard.press('Escape')
+                                logger.info(f"Pressed Escape for {handler['name']}")
+                                await asyncio.sleep(0.5)
+                            except:
+                                pass
+                        elif handler['action'] == 'remove':
+                            await self.page.evaluate(f'document.querySelectorAll("{handler["selector"]}").forEach(el => el.remove())')
+                            logger.info(f"Removed {handler['name']}")
                 except:
-                    await asyncio.sleep(1)
-            
-            return True
-        except:
-            return False
-        
+                    pass
+        except Exception as e:
+            logger.debug(f"Error dismissing popups: {e}")
 
+    async def scrape_chat_history(self):
+        """Scrapes the full chat history from the messenger page"""
+        print("      → Scraping chat history...")
+        logger.info("Scraping chat history")
+        chat_log = []
+
+        try:
+            chat_container_selector = 'div._container_i9fq9_12'
+            await self.page.wait_for_selector(chat_container_selector, timeout=30000)
+            
+            all_blocks = self.page.locator(f'{chat_container_selector} > div')
+            count = await all_blocks.count()
+            logger.info(f"Found {count} chat blocks")
+
+            for i in range(count):
+                block = all_blocks.nth(i)
+                entry = ""
+                block_class = await block.get_attribute('class') or ""
+
+                # Date separator
+                if 'r-1awozwy' in block_class and 'r-5oul0u' in block_class:
+                    date_locator = block.locator('div.r-1rbol0d')
+                    if await date_locator.count() > 0:
+                        date_text = await date_locator.first.inner_text(timeout=500)
+                        if any(day in date_text for day in ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']):
+                            entry = f"\n--- {date_text.strip()} ---"
+                            if entry and entry not in chat_log:
+                                chat_log.append(entry)
+                            continue
+                
+                # Recruiter messages
+                if 'r-88pszg' in block_class:
+                    time_locator = block.locator('div[class*="r-a5pmau"], div[style*="margin-right: 12px;"]')
+                    time = await time_locator.first.inner_text() if await time_locator.count() > 0 else ""
+                    
+                    msg_text_locator = block.locator('div.text-white.break-word')
+                    if await msg_text_locator.count() > 0:
+                        msg = await msg_text_locator.first.inner_text()
+                        if msg:
+                            entry = f"[{time}] Recruiter: {msg.strip()}"
+                    elif await block.locator('div[class*="r-3hmvjm"]').count() > 0:
+                        system_msg = await block.locator('div[class*="r-3hmvjm"]').first.inner_text()
+                        entry = f"[{time}] System: {' '.join(system_msg.split())}"
+                    
+                    if entry and entry not in chat_log:
+                        chat_log.append(entry)
+                    continue
+
+                # Candidate messages
+                if 'r-1jkjb' in block_class:
+                    if await block.locator('div[class*="r-6koalj"]').count() > 0:
+                        continue
+
+                    time_locator = block.locator('div[class*="r-1b7u577"]')
+                    time = await time_locator.first.inner_text() if await time_locator.count() > 0 else ""
+                    
+                    msg_text_locator = block.locator('div.break-word[style*="white-space: pre-wrap;"]')
+                    file_locator = block.locator('div[class*="r-1iln25a"]')
+                    applied_locator = block.locator('div[class*="r-1gjx2kl"]')
+
+                    if await msg_text_locator.count() > 0:
+                        texts = await msg_text_locator.all_inner_texts()
+                        msg = "\n".join(t.strip() for t in texts if t.strip())
+                        if msg:
+                            entry = f"[{time}] Candidate: {msg}"
+                    elif await file_locator.count() > 0:
+                        file_name = await file_locator.first.inner_text()
+                        entry = f"[{time}] Candidate: [Sent File: {file_name.strip()}]"
+                    elif await applied_locator.count() > 0:
+                        system_msg = await applied_locator.first.inner_text()
+                        entry = f"[{time}] System: {' '.join(system_msg.split())}"
+                    
+                    if entry and entry not in chat_log:
+                        chat_log.append(entry)
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scraping chat history: {e}")
+            return "Error scraping chat history."
+
+        if not chat_log:
+            logger.info("No chat messages found")
+            return "No chat messages found."
+
+        final_log = "\n".join(chat_log).replace('\n\n\n', '\n\n')
+        print(f"      ✓ Scraped {len(chat_log)} chat entries.")
+        logger.info(f"Scraped {len(chat_log)} chat entries")
+        return final_log
+
+    async def generate_chat_summary(self, chat_history):
+        """Generate a summary of the chat conversation using Google Gemini"""
+        if not self.gemini_api_key:
+            logger.info("Google Gemini not configured, skipping summary")
+            return "N/A"
+        
+        if not chat_history or chat_history in ["N/A", "No chat messages found.", "Error scraping chat history."]:
+            logger.info("No chat history to summarize")
+            return "N/A"
+            
+        try:
+            print("      → Generating conversation summary with Google Gemini...")
+            logger.info("Generating chat summary")
+            
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            
+            prompt = (
+                "You are a helpful assistant that summarizes job application conversations between a recruiter and a candidate. "
+                "Provide a concise summary highlighting key points like candidate interest, availability, qualifications, questions asked, and next steps. "
+                "Keep the summary under 150 words.\n\n"
+                "Here is the conversation:\n\n"
+                f"{chat_history}"
+            )
+            
+            response = await asyncio.to_thread(model.generate_content, prompt)
+            
+            summary = response.text.strip()
+            print(f"      ✓ Summary generated ({len(summary)} characters)")
+            logger.info(f"Summary generated ({len(summary)} characters)")
+            return summary
+                
+        except Exception as e:
+            print(f"      ✗ Error generating chat summary: {e}")
+            logger.error(f"Error generating chat summary: {e}")
+            return "Error generating summary"
 
     async def scrape_section(self, section_name):
-        """Improved section scraping with better state management"""
+        """Scrape section with retry logic and chat integration"""
         section_url = f"{self.base_url}/jobs/{self.job_id}/{section_name}"
         print(f"\n→ Processing section: {section_url}")
         logger.info(f"Processing section: {section_name}")
@@ -295,19 +491,17 @@ class JobTodayWebhookScraper:
         if hasattr(self, 'progress_tracker'):
             self.progress_tracker.update(section=section_name)
         
-        # Load the section page ONCE at the start
+        # Load the section page
         page_loaded = False
         for attempt in range(1, 4):
             try:
                 print(f"   → Loading page (attempt {attempt}/3)...")
                 logger.info(f"Loading page attempt {attempt}/3")
                 
-                # Navigate to section
                 await self.page.goto(section_url, wait_until='networkidle', timeout=180000)
                 logger.info("Page loaded with networkidle")
                 await asyncio.sleep(3)
                 
-                # Check for login redirect
                 current_url = self.page.url
                 logger.info(f"Current URL: {current_url}")
                 
@@ -319,9 +513,8 @@ class JobTodayWebhookScraper:
                     await self.page.goto(section_url, wait_until='networkidle', timeout=180000)
                     await asyncio.sleep(3)
                 
-                # Wait for list container
                 list_container_selector = 'div.col-span-1.overflow-y-auto'
-                logger.info(f"Waiting for list container: {list_container_selector}")
+                logger.info(f"Waiting for list container")
                 
                 try:
                     await self.page.wait_for_selector(list_container_selector, timeout=60000)
@@ -350,12 +543,11 @@ class JobTodayWebhookScraper:
         if not page_loaded:
             raise Exception(f"Could not load section {section_name}")
         
-        # Give extra time for dynamic content
         await asyncio.sleep(3)
         
         # Count candidates
         candidate_button_selector = 'button:has(img[alt$="\'s avatar"])'
-        logger.info(f"Looking for candidates with selector: {candidate_button_selector}")
+        logger.info(f"Looking for candidates")
         
         try:
             await self.page.wait_for_selector(candidate_button_selector, timeout=30000)
@@ -372,8 +564,10 @@ class JobTodayWebhookScraper:
         print(f"   ✓ Found {total_candidates} candidates")
         logger.info(f"Starting to process {total_candidates} candidates")
 
-        # Process each candidate
-        for i in range(total_candidates):
+        # Process each candidate with retry logic
+        i = 0
+        while i < total_candidates:
+            candidate_name = f"Candidate {i+1}"
             try:
                 logger.info(f"{'='*50}")
                 logger.info(f"Processing candidate {i+1}/{total_candidates}")
@@ -385,22 +579,19 @@ class JobTodayWebhookScraper:
                         processed=i
                     )
                 
-                # Navigate back to list if we're not on it (after viewing a profile)
+                # Navigate back to list if needed
                 if i > 0:
                     logger.info("Navigating back to list view...")
                     
-                    # Try browser back button first (faster)
                     try:
                         await self.page.go_back(wait_until='domcontentloaded', timeout=60000)
                         logger.info("Used browser back button")
                         await asyncio.sleep(2)
                     except:
-                        # Fallback to direct navigation
                         logger.info("Back button failed, using direct navigation")
                         await self.page.goto(section_url, wait_until='domcontentloaded', timeout=120000)
                         await asyncio.sleep(3)
                     
-                    # Wait for list to be ready
                     try:
                         await self.page.wait_for_selector(candidate_button_selector, timeout=40000)
                         logger.info("List reloaded successfully")
@@ -410,20 +601,20 @@ class JobTodayWebhookScraper:
                         await asyncio.sleep(3)
                         await self.page.wait_for_selector(candidate_button_selector, timeout=40000)
                 
-                # Verify we still have enough candidates
+                # Verify candidate count
                 current_count = await self.page.locator(candidate_button_selector).count()
                 logger.info(f"Current candidate count: {current_count}")
                 
                 if i >= current_count:
                     logger.warning(f"Candidate index {i} out of range (only {current_count} candidates)")
                     print(f"   ⚠ Skipping - candidate index out of range")
+                    i += 1
                     continue
                 
-                # Get the specific candidate button
+                # Get candidate button and name
                 candidate_button = self.page.locator(candidate_button_selector).nth(i)
                 logger.info(f"Got candidate button at index {i}")
                 
-                # Get candidate name
                 try:
                     candidate_name_elem = candidate_button.locator('.font-bold').first
                     candidate_name = await candidate_name_elem.inner_text(timeout=20000)
@@ -437,12 +628,30 @@ class JobTodayWebhookScraper:
                 if candidate_name in self.processed_names:
                     logger.info(f"Skipping {candidate_name} - already processed")
                     print(f"   ✓ Skipping (already processed)")
+                    i += 1
                     continue
+                
+                # Retry logic
+                max_retries = 1
+                attempt_count = self.candidate_retry_attempts.get(candidate_name, 0)
+                
+                if attempt_count > max_retries:
+                    logger.warning(f"Max retries reached for {candidate_name}")
+                    print(f"   ! Max retries reached. Skipping.")
+                    self.processed_names.add(candidate_name)
+                    i += 1
+                    continue
+                
+                self.candidate_retry_attempts[candidate_name] = attempt_count + 1
+                
+                if attempt_count > 0:
+                    logger.info(f"RETRY attempt {attempt_count + 1} for {candidate_name}")
+                    print(f"   → RETRY attempt {attempt_count + 1}")
                 
                 if hasattr(self, 'progress_tracker'):
                     self.progress_tracker.update(candidate=candidate_name)
                 
-                # Get application date before clicking
+                # Get application date
                 application_date = "N/A"
                 try:
                     date_locator = candidate_button.locator('p:has-text("Applied on")')
@@ -458,17 +667,18 @@ class JobTodayWebhookScraper:
                 
                 try:
                     await candidate_button.click(timeout=60000)
-                    logger.info("Click successful, waiting for profile...")
+                    logger.info("Click successful")
                 except Exception as click_error:
                     logger.error(f"Click failed: {click_error}")
-                    print(f"   ✗ Click failed: {click_error}")
+                    print(f"   ✗ Click failed")
+                    i += 1
                     continue
                 
                 await asyncio.sleep(3)
                 
-                # Wait for profile to load
+                # Wait for profile
                 profile_selector = 'button:has-text("Chat with")'
-                logger.info(f"Waiting for profile to load: {profile_selector}")
+                logger.info(f"Waiting for profile to load")
                 
                 try:
                     await self.page.wait_for_selector(profile_selector, timeout=60000)
@@ -477,14 +687,11 @@ class JobTodayWebhookScraper:
                 except PlaywrightTimeout:
                     logger.error("Profile load timeout")
                     print(f"   ✗ Profile timeout, skipping")
+                    i += 1
                     continue
                 
-                # Remove popups
-                try:
-                    await self.page.evaluate('document.querySelectorAll("[id^=intercom-container], .intercom-lightweight-app").forEach(el => el.remove())')
-                except:
-                    pass
-                
+                # Dismiss popups
+                await self.dismiss_popups()
                 await asyncio.sleep(2)
                 
                 # Scrape details
@@ -493,40 +700,63 @@ class JobTodayWebhookScraper:
                 
                 try:
                     details = await self.scrape_candidate_details(self.page.url, application_date)
-                    self.candidates.append(details)
-                    self.processed_names.add(candidate_name)
-                    logger.info(f"✓ Successfully scraped: {details.get('name', 'N/A')}")
-                    print(f"   ✓ Scraped: {details.get('name', 'N/A')}")
                     
-                    if hasattr(self, 'progress_tracker'):
-                        self.progress_tracker.update(processed=i+1)
+                    # Validate phone number
+                    phone = details.get('phone', 'N/A')
+                    is_phone_valid = phone and phone != "N/A" and '…' not in phone and len(phone) >= 9
+                    
+                    if is_phone_valid:
+                        logger.info(f"✓ Successfully scraped: {details.get('name', 'N/A')}")
+                        print(f"   ✓ Scraped: {details.get('name', 'N/A')}")
+                        self.candidates.append(details)
+                        self.processed_names.add(candidate_name)
+                        
+                        if hasattr(self, 'progress_tracker'):
+                            self.progress_tracker.update(processed=i+1)
+                        
+                        i += 1  # SUCCESS - move to next candidate
+                    else:
+                        logger.warning(f"Phone scraping failed for {candidate_name}")
+                        print(f"   ✗ Phone scraping failed. Will retry this candidate.")
+                        # Don't increment i - will retry same candidate
                             
                 except Exception as scrape_error:
                     logger.error(f"Error scraping details: {scrape_error}")
                     logger.error(traceback.format_exc())
                     print(f"   ✗ Error scraping: {scrape_error}")
+                    i += 1  # Move on after error
                 
             except Exception as e:
                 logger.error(f"Error processing candidate {i+1}: {e}")
                 logger.error(traceback.format_exc())
                 print(f"   ✗ Error processing candidate {i+1}: {e}")
                 
-                # Try to recover by going back to list
                 try:
                     logger.info("Attempting to recover by navigating back to list...")
                     await self.page.goto(section_url, wait_until='domcontentloaded', timeout=120000)
                     await asyncio.sleep(3)
                 except:
-                    logger.error("Could not recover, continuing to next candidate")
+                    logger.error("Could not recover")
                 
+                i += 1  # Move on after critical error
                 continue
+            
+            finally:
+                if self.page.is_closed():
+                    logger.error("Page closed unexpectedly")
+                    print("   ! Browser closed unexpectedly. Halting.")
+                    break
+                if i < total_candidates:
+                    logger.info("Resetting to list view...")
+                    await self.page.goto(section_url, wait_until="domcontentloaded", timeout=90000)
+                    await asyncio.sleep(3)
         
         logger.info(f"Finished section: {section_name}")
         print(f"\n✓ Finished section: {section_name}")
         print(f"   Total: {total_candidates}, Scraped: {len([c for c in self.candidates if c.get('name') != 'N/A'])}")
 
     async def scrape_candidate_details(self, candidate_url, application_date):
-        """Scrape candidate details from profile"""
+        """Scrape candidate details including chat history and summary"""
         details = {
             'profile_url': candidate_url, 
             'application_date': application_date, 
@@ -544,41 +774,71 @@ class JobTodayWebhookScraper:
                 except:
                     return "N/A"
 
+            await self.dismiss_popups()
+            await asyncio.sleep(1)
+            
             # Name
             details['name'] = await get_text(profile_pane.locator('div.font-bold.text-2xl').first)
+            logger.info(f"Name: {details['name']}")
             
-            # Phone
+            # Phone with retry logic
             try:
                 phone_container = profile_pane.locator('div.flex.items-center.gap-2.mt-2:has(img[src*="IconPhoneFilled28"])')
-                show_button = profile_pane.locator('span.cursor-pointer.text-jt-blue-500:has-text("Show phone")')
-                
-                if await show_button.count() > 0:
-                    try:
-                        await show_button.click(timeout=10000)
+                phone_number = "N/A"
+                max_attempts = 3
+
+                for attempt in range(1, max_attempts + 1):
+                    phone_span = phone_container.locator('span').first
+                    phone_text = await phone_span.text_content(timeout=6000) or ""
+                    current_phone_value = phone_text.replace("Show phone", "").strip()
+
+                    if current_phone_value and '…' not in current_phone_value and len(current_phone_value) >= 9:
+                        phone_number = current_phone_value
+                        logger.info(f"Phone retrieved successfully: {phone_number}")
+                        break
+
+                    show_phone_button = profile_pane.locator('span.cursor-pointer.text-jt-blue-500:has-text("Show phone")')
+                    if await show_phone_button.count() > 0:
+                        try:
+                            logger.info(f"Clicking 'Show phone' button (attempt {attempt})")
+                            await show_phone_button.click(timeout=5000, force=True)
+                            await asyncio.sleep(2)
+                            await self.dismiss_popups()
+                            await asyncio.sleep(1)
+
+                            phone_text = await phone_span.text_content(timeout=6000) or ""
+                            phone_number = phone_text.replace("Show phone", "").strip()
+                            
+                            if phone_number and '…' not in phone_number and len(phone_number) >= 9:
+                                logger.info(f"Phone retrieved after click: {phone_number}")
+                                break
+                        except Exception as click_error:
+                            logger.warning(f"Error clicking show phone: {click_error}")
+                            pass
+                    
+                    if attempt < max_attempts:
+                        logger.info(f"Phone not fully loaded, waiting...")
                         await asyncio.sleep(2)
-                    except:
-                        pass
-                    
-                    phone_span = phone_container.locator('span').first
-                    phone_text = await phone_span.text_content(timeout=6000)
-                    phone_number = phone_text.strip() if phone_text else "N/A"
-                    
-                    if "Show phone" in phone_number:
-                        phone_number = phone_number.replace("Show phone", "").strip()
-                else:
-                    phone_span = phone_container.locator('span').first
-                    phone_text = await phone_span.text_content(timeout=6000)
-                    phone_number = phone_text.strip() if phone_text else "N/A"
+                    else:
+                        phone_text = await phone_span.text_content(timeout=6000) or ""
+                        phone_number = phone_text.replace("Show phone", "").strip()
+                        logger.warning(f"Final phone value: {phone_number}")
                 
                 details['phone'] = phone_number
-            except: 
+
+            except Exception as e: 
+                logger.error(f"Error getting phone: {e}")
                 details['phone'] = "N/A"
+            
+            await self.dismiss_popups()
             
             # Email
             details['email'] = await get_text(profile_pane.locator('a[href^="mailto:"]').first)
+            logger.info(f"Email: {details['email']}")
             
             # Location
             details['location'] = await get_text(profile_pane.locator('div:has(img[src*="IconPinThinBlack20"]) > span').first)
+            logger.info(f"Location: {details['location']}")
             
             # About
             try:
@@ -611,9 +871,55 @@ class JobTodayWebhookScraper:
             except:
                 details['languages'] = "N/A"
 
+            # Chat history and summary
+            details['chat_history'] = 'N/A'
+            details['chat_summary'] = 'N/A'
+            
+            try:
+                print("   → Attempting to scrape chat history...")
+                logger.info("Attempting to scrape chat history")
+                
+                await self.dismiss_popups()
+                
+                chat_button_selector = 'button:has-text("Chat with")'
+                chat_button = profile_pane.locator(chat_button_selector).first
+
+                if await chat_button.count() > 0:
+                    logger.info("Clicking chat button")
+                    await chat_button.click()
+                    
+                    print("      → Navigating to messenger...")
+                    logger.info("Navigating to messenger")
+                    await self.page.wait_for_url(lambda url: '/messenger' in url, timeout=90000)
+                    await asyncio.sleep(3)
+                    
+                    await self.dismiss_popups()
+                    
+                    details['chat_history'] = await self.scrape_chat_history()
+                    
+                    # Generate summary
+                    details['chat_summary'] = await self.generate_chat_summary(details['chat_history'])
+                    
+                    logger.info("Chat history and summary completed")
+                else:
+                    logger.info("Chat button not found")
+                    print("   ! Chat button not found.")
+
+            except Exception as e:
+                logger.error(f"Could not scrape chat history: {e}")
+                print(f"   ✗ Could not scrape chat history: {str(e).splitlines()[0]}")
+                if '/messenger' in self.page.url:
+                    try:
+                        await self.page.go_back(wait_until='domcontentloaded')
+                        logger.info("Navigated back from messenger")
+                    except Exception as nav_e:
+                        logger.error(f"Failed to navigate back: {nav_e}")
+
             return details
             
         except Exception as e:
+            logger.error(f"Error in scrape_candidate_details: {e}")
+            logger.error(traceback.format_exc())
             print(f"      ✗ Error in scrape_candidate_details: {e}")
             return details
 
@@ -624,6 +930,7 @@ class JobTodayWebhookScraper:
             
         try:
             print("→ Checking Airtable for existing candidates...")
+            logger.info("Checking Airtable for existing candidates")
             headers = {'Authorization': f'Bearer {self.airtable_token}'}
             
             existing_urls = set()
@@ -637,6 +944,7 @@ class JobTodayWebhookScraper:
                 response = requests.get(self.airtable_api_url, headers=headers, params=params, timeout=60)
                 
                 if response.status_code != 200:
+                    logger.warning(f"Could not fetch records: {response.status_code}")
                     print(f"   ⚠ Could not fetch records: {response.status_code}")
                     return set()
                 
@@ -651,9 +959,11 @@ class JobTodayWebhookScraper:
                     break
             
             print(f"   ✓ Found {len(existing_urls)} existing candidates")
+            logger.info(f"Found {len(existing_urls)} existing candidates in Airtable")
             return existing_urls
             
         except Exception as e:
+            logger.error(f"Error fetching from Airtable: {e}")
             print(f"   ✗ Error: {e}")
             return set()
 
@@ -661,19 +971,23 @@ class JobTodayWebhookScraper:
         """Push new candidates to Airtable"""
         if not self.airtable_token or not self.airtable_base_id:
             print("⚠ Airtable not configured")
+            logger.warning("Airtable not configured")
             return []
             
         try:
             print("\n→ Pushing to Airtable...")
+            logger.info("Pushing to Airtable")
             
             existing_urls = self.get_existing_profiles()
             new_candidates = [c for c in self.candidates if c.get('profile_url') not in existing_urls]
             
             if not new_candidates:
                 print("   ! All candidates already exist")
+                logger.info("All candidates already exist in Airtable")
                 return []
             
             print(f"   → Pushing {len(new_candidates)} new candidates")
+            logger.info(f"Pushing {len(new_candidates)} new candidates")
             
             headers = {
                 'Authorization': f'Bearer {self.airtable_token}',
@@ -695,6 +1009,8 @@ class JobTodayWebhookScraper:
                         'Profile URL': candidate.get('profile_url', ''),
                         'Application Date': candidate.get('application_date', ''),
                         'Role': candidate.get('job_role', ''),
+                        'Chat History': candidate.get('chat_history', ''),
+                        'Chat Summary': candidate.get('chat_summary', ''),
                         'Status': 'New',
                         'Notes': ''
                     }
@@ -712,14 +1028,19 @@ class JobTodayWebhookScraper:
                 
                 if response.status_code == 200:
                     total_pushed += len(batch)
+                    logger.info(f"Pushed batch {i//batch_size + 1}")
                     print(f"   ✓ Pushed batch {i//batch_size + 1}")
                 else:
+                    logger.error(f"Error pushing batch: {response.status_code}")
                     print(f"   ✗ Error: {response.status_code}")
             
             print(f"✓ Pushed {total_pushed} candidates")
+            logger.info(f"✓ Pushed {total_pushed} candidates to Airtable")
             return new_candidates
             
         except Exception as e:
+            logger.error(f"Airtable error: {e}")
+            logger.error(traceback.format_exc())
             print(f"✗ Airtable error: {e}")
             return []
 
@@ -730,6 +1051,7 @@ class JobTodayWebhookScraper:
             
         try:
             print("\n→ Sending to n8n...")
+            logger.info("Sending to n8n webhook")
             
             payload = {
                 'timestamp': datetime.now().isoformat(),
@@ -744,10 +1066,13 @@ class JobTodayWebhookScraper:
             
             if response.status_code in [200, 201, 204]:
                 print(f"✓ Sent {len(new_candidates)} to n8n")
+                logger.info(f"✓ Sent {len(new_candidates)} candidates to n8n")
             else:
                 print(f"⚠ Webhook status {response.status_code}")
+                logger.warning(f"Webhook returned status {response.status_code}")
                 
         except Exception as e:
+            logger.error(f"n8n webhook error: {e}")
             print(f"✗ n8n error: {e}")
 
     async def save_to_json(self, filename='candidates_detailed.json'):
@@ -760,6 +1085,7 @@ class JobTodayWebhookScraper:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=4, ensure_ascii=False)
         print(f"✓ Saved to {filename}")
+        logger.info(f"Saved to {filename}")
 
     async def export_to_csv(self, filename='candidates_detailed.csv'):
         if not self.candidates:
@@ -773,14 +1099,18 @@ class JobTodayWebhookScraper:
                 writer.writeheader()
                 writer.writerows(self.candidates)
             print(f"✓ Exported to {filename}")
+            logger.info(f"Exported to {filename}")
         except Exception as e:
+            logger.error(f"CSV export error: {e}")
             print(f"✗ CSV error: {e}")
 
     async def close(self):
         if self.browser:
             await self.browser.close()
+            logger.info("Browser closed")
         if self.playwright:
             await self.playwright.stop()
+            logger.info("Playwright stopped")
         print("✓ Browser closed")
 
     async def run(self, headless=True):
@@ -817,7 +1147,6 @@ class JobTodayWebhookScraper:
             # Scrape job role
             await self.scrape_job_role()
 
-            # REMOVED: Don't navigate here - let scrape_section handle it
             logger.info("Ready to start scraping sections...")
             print("\n→ Starting to scrape sections...")
 
@@ -855,7 +1184,7 @@ class JobTodayWebhookScraper:
             print(f"  New: {len(new_candidates)}")
             print("="*50)
             
-            logger.info(f"Scraping complete - Total: {len(self.candidates)}, New: {len(new_candidates)}")
+            logger.info(f"✓ Scraping complete - Total: {len(self.candidates)}, New: {len(new_candidates)}")
 
         except Exception as e:
             error_msg = str(e)
